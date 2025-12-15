@@ -1,0 +1,22 @@
+{
+  "name": "theforjebot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Forje — BSC Testnet",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "ethers": "^6.7.0",
+    "express": "^5.2.0",
+    "fs-extra": "^11.3.2",
+    "telegraf": "^4.12.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
