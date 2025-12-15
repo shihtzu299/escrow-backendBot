@@ -26,11 +26,11 @@ if (!BOT_TOKEN || !PRIVATE_KEY) {
 // ===== MULTIPLE RPC PROVIDERS WITH TIMEOUT & FAILOVER =====
 const RPC_URLS = [
   process.env.RPC_URL?.trim(),
-  'https://bsc-testnet-rpc.publicnode.com',
-  'https://bsc-testnet-dataseed1.binance.org',
-  'https://bsc-testnet.bnbchain.org',
-  'https://data-seed-prebsc-1-s1.binance.org:8545',
-  'https://bsc-testnet.publicnode.com'
+  'https://bsc-dataseed.bnbchain.org',
+  'https://bsc-rpc.publicnode.com',
+  'https://bsc-dataseed1.binance.org',
+  'https://bsc-dataseed2.binance.org',
+  'https://bsc-dataseed3.binance.org'
 ].filter(Boolean);
 
 let provider;
@@ -51,7 +51,7 @@ async function createProvider() {
     }
   }
   console.warn('All RPCs failed. Using fallback...');
-  return new ethers.JsonRpcProvider('https://bsc-testnet.publicnode.com', undefined, {
+  return new ethers.JsonRpcProvider('https://bsc-dataseed.bnbchain.org', undefined, {
     pollingInterval: 15000,
     timeout: 12000,
   });
@@ -61,9 +61,9 @@ provider = await createProvider();
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ===== CONTRACTS =====
-const FACTORY_ADDRESS = '0x885bA00982756f06f5802a7aa0f8Dd5691059896';
-const USDT_ADDRESS    = '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd';
-const USDC_ADDRESS    = '0x64544969ed7EBf5f083679233325356EbE738930';
+const FACTORY_ADDRESS = '0x752c69ee75E7BF58ac478e2aC1F7E7fd341BB865';
+const USDT_ADDRESS    = '0x55d398326f99059fF775485246999027B3197955';
+const USDC_ADDRESS    = '0x8AC76a51cc950d9822D68b83fE1Ad97b32Cd580d';
 
 const FACTORY_ABI = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrowFactory.json'), 'utf8'));
 const ESCROW_ABI  = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrow.json'), 'utf8'));
@@ -76,7 +76,7 @@ const bot = new Telegraf(BOT_TOKEN);
 
 // ===== HELPERS =====
 const formatAddress = (addr) => addr ? `\`${addr.slice(0, 8)}…${addr.slice(-6)}\`` : '`—`';
-const explorer = (addr) => `https://testnet.bscscan.com/address/${addr}#code`;
+const explorer = (addr) => `https://bscscan.com/address/${addr}#code`;
 const writeLink = (addr) => `${explorer(addr)}#writeContract`;
 const code = (text) => `\`\`\`\n${text}\n\`\`\``;
 
@@ -513,7 +513,7 @@ bot.command('approveUSDT', (ctx) => {
   const amount = ethers.parseUnits(amountStr, TOKEN_DECIMALS);
   ctx.reply(
 `*Approve USDT*
-1\\) [Open USDT Write](https://testnet.bscscan.com/address/${USDT_ADDRESS}#writeContract)
+1\\) [Open USDT Write](https://bscscan.com/address/${USDT_ADDRESS}#writeContract)
 2\\) Connect wallet
 3\\) Find *approve*
 4\\) spender: \`${escrow}\`
