@@ -1,13 +1,11 @@
 // server.js — FORJE BOT v9.2 — FINAL, TIMEOUT-PROOF, FLAWLESS
 import 'dotenv/config';
+const http = require('http');
 import { Telegraf, Markup } from 'telegraf';
 import { ethers } from 'ethers';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
@@ -22,6 +20,19 @@ if (!BOT_TOKEN || !PRIVATE_KEY) {
   console.error('FATAL: BOT_TOKEN or PRIVATE_KEY missing in .env');
   process.exit(1);
 }
+
+const dummyServer = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Forje Bot is running (polling mode)');
+});
+
+const PORT = process.env.PORT || 10000;  // Render uses PORT env var
+dummyServer.listen(PORT, () => {
+  console.log(`Dummy server listening on port ${PORT} for Render health check`);
+});
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ===== MULTIPLE RPC PROVIDERS WITH TIMEOUT & FAILOVER =====
 const RPC_URLS = [
