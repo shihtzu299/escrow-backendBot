@@ -1,14 +1,15 @@
-// Dynamic imports for all heavy/runtime dependencies (fixes Vercel ESM issues)
-import express from 'express';
+// server.js — FORJE BOT v9.2 — FULL DYNAMIC IMPORTS (VERCEL FIX)
+async function startServer() {
+  // Dynamic load ALL dependencies
+  const express = (await import('express')).default;
+  const { ethers } = await import('ethers');
+  const fs = await import('fs-extra');
+  const path = await import('path');
+  const { fileURLToPath } = await import('url');
+  const dotenv = await import('dotenv');
+  const { Telegraf, Markup } = await import('telegraf');
 
-const { ethers } = await import('ethers');
-const fs = await import('fs-extra');
-const path = await import('path');
-const { fileURLToPath } = await import('url');
-const dotenv = await import('dotenv');
-const { Telegraf, Markup } = await import('telegraf');
-
-dotenv.config();
+  dotenv.config();
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
@@ -663,4 +664,10 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Forje Bot webhook server running on port ${PORT}`);
   console.log('FORJE BOT v9.2 — WEBHOOK MODE — LIVE ON MAINNET');
+});
+}
+
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
