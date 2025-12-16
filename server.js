@@ -1,6 +1,6 @@
 // server.js — FORJE BOT v9.2 — FINAL, TIMEOUT-PROOF, FLAWLESS
 import 'dotenv/config';
-const http = require('http');
+import http from 'http';
 import { Telegraf, Markup } from 'telegraf';
 import { ethers } from 'ethers';
 import fs from 'fs-extra';
@@ -26,7 +26,7 @@ const dummyServer = http.createServer((req, res) => {
   res.end('Forje Bot is running (polling mode)');
 });
 
-const PORT = process.env.PORT || 10000;  // Render uses PORT env var
+const PORT = process.env.PORT || 10000;
 dummyServer.listen(PORT, () => {
   console.log(`Dummy server listening on port ${PORT} for Render health check`);
 });
