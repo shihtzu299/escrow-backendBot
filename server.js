@@ -368,18 +368,18 @@ bot.command('stats', async (ctx) => {
 
 bot.start(async (ctx) => {
   await ctx.reply(
-`*Welcome to Forje (BSC Testnet)*
+`*Welcome to Forje (BSC)*
 
-*TO CREATE GIG PAYMENT ESCROW:*
-\`/setWallet 0xYourAddress\`
+*Client Actions:*
+- To create gig payment escrow, "Enter the Forge"
+- Share escrow address with freelancer
 
-*Client Commands:*
-/createJob <freelancer> <USDT|USDC>
+*Freelancer Actions:*
+- For escrow alerts, run: /link <escrow> <role> <address>
+- Example: /link 0xEscrowAddress freelancer 0xYourWalletAddress
+- Proceed to "Enter the Forge" to manage jobs
 
-*Freelancer Commands:*
-/link <escrow> <role> <address>
-
-*Global:* /open | /who <escrow> | /stats`,
+*Global Commands:* /who <escrow> | /stats`,
     { parse_mode: 'Markdown', reply_markup: webAppKeyboard?.reply_markup }
   );
 });
