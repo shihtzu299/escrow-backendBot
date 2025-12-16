@@ -1,5 +1,4 @@
-// server.js — FORJE BOT v9.2 — WEBHOOK MODE (FREE ON VERCEL)
-import 'dotenv/config';
+// server.js — FORJE BOT v9.2 — WEBHOOK MODE (ESM-SAFE DOTENV)
 import { Telegraf, Markup } from 'telegraf';
 import { ethers } from 'ethers';
 import fs from 'fs-extra';
@@ -7,8 +6,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Dynamic dotenv load for ESM (fixes Vercel resolution)
+import dotenv from 'dotenv';
+dotenv.config();
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
@@ -23,6 +23,10 @@ if (!BOT_TOKEN || !PRIVATE_KEY) {
   console.error('FATAL: BOT_TOKEN or PRIVATE_KEY missing');
   process.exit(1);
 }
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 
 // ===== RPC =====
 const RPC_URLS = [
