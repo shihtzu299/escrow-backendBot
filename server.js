@@ -1,10 +1,11 @@
-// server.js — FORJE BOT v9.2 — FINAL, TIMEOUT-PROOF, FLAWLESS
+// server.js — FORJE BOT v9.2 — WEBHOOK MODE (FREE ON VERCEL)
 import 'dotenv/config';
 import { Telegraf, Markup } from 'telegraf';
 import { ethers } from 'ethers';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import express from 'express';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,11 +20,11 @@ const DEFAULT_ORACLE_TG_ID = (process.env.DEFAULT_ORACLE_TG_ID || '').trim();
 const ORACLE_ALERT_TG_IDS = (process.env.ORACLE_ALERT_TG_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 if (!BOT_TOKEN || !PRIVATE_KEY) {
-  console.error('FATAL: BOT_TOKEN or PRIVATE_KEY missing in .env');
+  console.error('FATAL: BOT_TOKEN or PRIVATE_KEY missing');
   process.exit(1);
 }
 
-// ===== MULTIPLE RPC PROVIDERS WITH TIMEOUT & FAILOVER =====
+// ===== RPC =====
 const RPC_URLS = [
   process.env.RPC_URL?.trim(),
   'https://bsc-dataseed.bnbchain.org',
@@ -34,41 +35,30 @@ const RPC_URLS = [
 ].filter(Boolean);
 
 let provider;
-
 async function createProvider() {
   for (const url of RPC_URLS) {
     try {
-      console.log(`Trying RPC: ${url}`);
-      const prov = new ethers.JsonRpcProvider(url, undefined, {
-        pollingInterval: 12000,
-        timeout: 10000, // Critical: prevent hanging
-      });
+      const prov = new ethers.JsonRpcProvider(url);
       await prov.getBlockNumber();
-      console.log(`RPC CONNECTED & VERIFIED: ${url}`);
+      console.log(`RPC CONNECTED: ${url}`);
       return prov;
     } catch (e) {
-      console.warn(`RPC failed: ${url} → ${e.message}`);
+      console.warn(`RPC failed: ${url}`);
     }
   }
-  console.warn('All RPCs failed. Using fallback...');
-  return new ethers.JsonRpcProvider('https://bsc-dataseed.bnbchain.org', undefined, {
-    pollingInterval: 15000,
-    timeout: 12000,
-  });
+  return new ethers.JsonRpcProvider('https://bsc-dataseed.bnbchain.org');
 }
-
 provider = await createProvider();
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ===== CONTRACTS =====
 const FACTORY_ADDRESS = '0x752c69ee75E7BF58ac478e2aC1F7E7fd341BB865';
-const USDT_ADDRESS    = '0x55d398326f99059fF775485246999027B3197955';
-const USDC_ADDRESS    = '0x8AC76a51cc950d9822D68b83fE1Ad97b32Cd580d';
+const USDT_ADDRESS = '0x55d398326f99059fF775485246999027B3197955';
+const USDC_ADDRESS = '0x8AC76a51cc950d9822D68b83fE1Ad97b32Cd580d';
 
 const FACTORY_ABI = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrowFactory.json'), 'utf8'));
-const ESCROW_ABI  = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrow.json'), 'utf8'));
+const ESCROW_ABI = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrow.json'), 'utf8'));
 
-const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, wallet);
+const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const escrowIface = new ethers.Interface(ESCROW_ABI);
 const TOKEN_DECIMALS = 18;
 
@@ -408,7 +398,7 @@ bot.command('link', async (ctx) => {
   db.escrows[key][r] = addr;
   db.escrows[key]['tg' + r.charAt(0).toUpperCase() + r.slice(1) + 'Id'] = ctx.from.id;
   saveDb();
-  ctx.reply(`✅ Linked\n*Escrow:* ${formatAddress(esc)}\n*Role:* ${r}\n*Wallet:* ${formatAddress(addr)}`, { parse_mode: 'Markdown' });
+  ctx.reply(`✅ Linked\n*Escrow:* ${formatAddress(esc)}\n*Role:* ${r}\n*Wallet:* ${formatAddress(addr)}\nNow you will get escrow event alerts.`, { parse_mode: 'Markdown' });
 });
 
 bot.command('who', async (ctx) => {
@@ -647,15 +637,26 @@ bot.command('refundNoStart', (ctx) => {
     { parse_mode: 'MarkdownV2', disable_web_page_preview: true }
   );
 });
-3
-// ===== LAUNCH =====
-console.log('FORJE BOT v9.2 — TIMEOUT-PROOF, FLAWLESS, FINAL');
-console.log(`Completed jobs: ${db.stats.totalCompleted}`);
 
-bot.launch({ dropPendingUpdates: true })
-  .then(() => console.log('FORJE BOT IS LIVE — UNSTOPPABLE'))
-  .catch(err => console.error('Bot failed to start:', err));
-
-// Poll every 30 seconds — now 100% reliable
 setInterval(pollOnce, 30000);
 pollOnce();
+
+// ===== WEBHOOK SERVER FOR VERCEL =====
+const app = express();
+app.use(express.json());
+
+// Webhook endpoint
+app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+  bot.handleUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// Health check (optional)
+app.get('/', (req, res) => res.send('Forje Bot is running!'));
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Forje Bot webhook server running on port ${PORT}`);
+  console.log('FORJE BOT v9.2 — WEBHOOK MODE — LIVE ON MAINNET');
+});
