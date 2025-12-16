@@ -1,13 +1,13 @@
-// server.js — FORJE BOT v9.2 — WEBHOOK MODE (ESM-SAFE DOTENV)
-import { Telegraf, Markup } from 'telegraf';
-import { ethers } from 'ethers';
-import fs from 'fs-extra';
-import path from 'path';
-import { fileURLToPath } from 'url';
+// Dynamic imports for all heavy/runtime dependencies (fixes Vercel ESM issues)
 import express from 'express';
 
-// Dynamic dotenv load for ESM (fixes Vercel resolution)
-import dotenv from 'dotenv';
+const { ethers } = await import('ethers');
+const fs = await import('fs-extra');
+const path = await import('path');
+const { fileURLToPath } = await import('url');
+const dotenv = await import('dotenv');
+const { Telegraf, Markup } = await import('telegraf');
+
 dotenv.config();
 
 // ===== CONFIG =====
