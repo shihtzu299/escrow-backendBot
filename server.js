@@ -24,16 +24,6 @@ if (!BOT_TOKEN || !PRIVATE_KEY) {
   process.exit(1);
 }
 
-const dummyServer = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Forje Bot is running');
-});
-
-const PORT = process.env.PORT || 10000;
-dummyServer.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -297,11 +287,9 @@ bot.start(async (ctx) => {
 
 The main app is now at https://forje.vercel.app
 
-Use the web app to create and manage escrows.
+To receive Telegram alerts for escrow events (deposits, disputes, approvals), link your Telegram ID using the format below:
 
-To receive Telegram alerts for escrow events (deposits, disputes, approvals), link your Telegram ID:
-
-\/link <escrowAddress> <client|freelancer> <yourWalletAddress>
+\/link <escrowAddress> <yourRole> <yourWalletAddress>
 
 Commands:
 \/stats — Your escrow history
@@ -422,9 +410,20 @@ app.get('/api/my-escrows', (req, res) => {
   res.json({ escrows });
 });
 
-// Start Express on same port as dummy (Render uses one port)
-app.listen(PORT);
+// ===== LAUNCH =====
+console.log('FORJE BOT v10 — LEAN NOTIFICATION BOT');
+console.log(`Completed jobs: ${db.stats.totalCompleted}`);
 
-bot.launch().then(() => console.log('Forje Notification Bot LIVE'));
+bot.launch({ dropPendingUpdates: true })
+  .then(() => console.log('Bot launched'))
+  .catch(err => console.error('Bot failed to start:', err));
+
+// Poll every 30 seconds
 setInterval(pollOnce, 30000);
 pollOnce();
+
+// Express API on Render port
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
