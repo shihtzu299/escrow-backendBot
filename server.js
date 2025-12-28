@@ -1,4 +1,4 @@
-// server.js — FORJE BOT v10 — LEAN NOTIFICATION BOT + WEB API
+// server.js — Afrilance BOT v10 — LEAN NOTIFICATION BOT + WEB API
 import 'dotenv/config';
 import http from 'http';
 import express from 'express';  // Added for API
@@ -7,6 +7,9 @@ import { ethers } from 'ethers';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import cors from 'cors';
+
+app.use(cors());  // Add this line
 
 const app = express();
 app.use(express.json());
@@ -181,8 +184,8 @@ async function handleLog(escAddr, log) {
         const [, deposit, bonus] = parsed.args;
         const dep = ethers.formatUnits(deposit, TOKEN_DECIMALS);
         const bon = ethers.formatUnits(bonus, 18);
-        await notify(rec.tgFreelancerId, `APPROVED! ✅\nYou received ${dep} ${tokenSym} + ${bon} FORJE bonus 💰\nEscrow: ${where}\nThank you!`);
-        await notify(rec.tgClientId, `Job approved ✅\nPayment released: ${dep} ${tokenSym} + ${bon} FORJE bonus 💰\nEscrow: ${where}`);
+        await notify(rec.tgFreelancerId, `APPROVED! ✅\nYou received ${dep} ${tokenSym}\nEscrow: ${where}\nThank you!`);
+        await notify(rec.tgClientId, `Job approved ✅\nPayment released: ${dep} ${tokenSym}\nEscrow: ${where}`);
         markEscrowCompleted(escAddr);
         break;
       }
@@ -236,6 +239,45 @@ async function pollOnce() {
     }
 
     const toBlock = latestBlock - 1;
+
+    // === NEW: Listen for new escrows from factory (web or anywhere) ===
+    try {
+      const jobCreatedTopic = ethers.id('JobCreated(address,address,address)');
+      const factoryLogs = await provider.getLogs({
+        address: FACTORY_ADDRESS,
+        topics: [jobCreatedTopic],
+        fromBlock,
+        toBlock
+      });
+
+      for (const log of factoryLogs) {
+        const parsed = factory.interface.parseLog(log);
+        if (parsed && parsed.name === 'JobCreated') {
+          const [escrowAddr, client, freelancer] = parsed.args;
+          const key = escrowAddr.toLowerCase();
+
+          if (!db.escrows[key]) {
+            db.escrows[key] = {
+              client,
+              freelancer,
+              oracle: wallet.address, // or your oracle address if different
+              tgClientId: null,
+              tgFreelancerId: null,
+              tgOracleId: DEFAULT_ORACLE_TG_ID || null, // Auto-linked oracle TG ID
+              state: 0,
+              deadline: 0,
+              completed: false
+            };
+            console.log(`New escrow auto-logged: ${escrowAddr} (client: ${client}, freelancer: ${freelancer})`);
+            saveDb();
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Factory JobCreated log fetch failed:', e.message);
+    }
+
+    // === YOUR ORIGINAL ESCROW POLLING (unchanged) ===
     const escrows = Object.keys(db.escrows);
 
     if (escrows.length === 0) {
@@ -283,18 +325,17 @@ provider.on('error', async (err) => {
 // ===== COMMANDS (lean) =====
 bot.start(async (ctx) => {
   await ctx.reply(
-`*Welcome to ForjeGigs Bot* 🔥⚒️
+`*Welcome to AfriLance Bot* 🤝
 
-The main app is now at https://forje.vercel.app
+The main app is now at https://afrilance-landing.vercel.app/
 
 To receive Telegram alerts for escrow events (deposits, disputes, approvals), link your Telegram ID using the format below:
 
 \/link <escrowAddress> <yourRole> <yourWalletAddress>
 
-Commands:
-\/stats — Your escrow history
-\/who <escrow> — Who is linked to an escrow
-\/link — Bind your Telegram for alerts`,
+*Link Command Example:*
+Client - /link escrowAddress client yourAddress
+Freelancer - /link escrowAddress freelancer yourAddress`,
     { parse_mode: 'Markdown', disable_web_page_preview: true }
   );
 });
@@ -353,7 +394,7 @@ bot.command('stats', async (ctx) => {
     const totalEver = (isPrivileged ? Object.keys(db.escrows).length : escrowsToCheck.length) + db.stats.totalCompleted;
     const format = (e) => `\`${e.addr}\` — [view](${explorer(e.addr)})`;
 
-    let text = isPrivileged ? `*GLOBAL FORJE STATS* \\(BSC Testnet\\)\n\n` : `*YOUR FORJE STATS*\n\n`;
+    let text = isPrivileged ? `*GLOBAL ESCROW STATS* \\(BSC MAINNET\\)\n\n` : `*YOUR ESCROW STATS*\n\n`;
     text += `*Total Jobs Ever:* \`${totalEver}\`\n`;
     text += `*Active:* \`${active.length}\` \\| *Completed:* \`${completed.length + db.stats.totalCompleted}\` \\| *Expired:* \`${expired.length}\`\n\n`;
 
@@ -369,7 +410,7 @@ bot.command('stats', async (ctx) => {
     if (active.length + completed.length + expired.length === 0) {
       text += isPrivileged ? "No escrows yet\\." : "😏 You have no escrows yet\\.";
     } else {
-      text += `The Forge never sleeps 🔥⚒️\\.`;
+      text += `Hardwork pays 🤝\\.`;
     }
 
     await ctx.reply(text, { parse_mode: 'MarkdownV2', disable_web_page_preview: true });
@@ -411,7 +452,7 @@ app.get('/api/my-escrows', (req, res) => {
 });
 
 // ===== LAUNCH =====
-console.log('FORJE BOT v10 — LEAN NOTIFICATION BOT');
+console.log('AFRILANCE BOT v10 — LEAN NOTIFICATION BOT');
 console.log(`Completed jobs: ${db.stats.totalCompleted}`);
 
 bot.launch({ dropPendingUpdates: true })
