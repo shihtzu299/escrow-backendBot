@@ -9,10 +9,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 
-app.use(cors());  // Add this line
-
 const app = express();
 app.use(express.json());
+app.use(cors());  // Add this line
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
