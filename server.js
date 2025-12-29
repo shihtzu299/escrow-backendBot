@@ -27,6 +27,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // In-memory cache (address lowercase → record)
 let escrowsCache = new Map();
 let totalCompleted = 0;
+let lastBlock = 0;
 
 // Load all escrows from Supabase on startup
 async function loadEscrows() {
@@ -59,6 +60,16 @@ async function upsertEscrow(record) {
     console.error('Supabase upsert error:', error);
   } else {
     escrowsCache.set(record.address.toLowerCase(), record);
+  }
+}
+
+// Mark completed (delete from cache and table)
+async function markEscrowCompleted(escAddr) {
+  const key = escAddr.toLowerCase();
+  if (escrowsCache.has(key)) {
+    escrowsCache.delete(key);
+    totalCompleted += 1;
+    await supabase.from('escrows').delete().eq('address', key);
   }
 }
 
@@ -95,8 +106,11 @@ async function createProvider() {
     try {
       const prov = new ethers.JsonRpcProvider(url);
       await prov.getBlockNumber();
+      console.log(`RPC CONNECTED: ${url}`);
       return prov;
-    } catch {}
+    } catch (e) {
+      console.warn(`RPC failed: ${url}`);
+    }
   }
   return new ethers.JsonRpcProvider('https://bsc-dataseed.bnbchain.org');
 }
@@ -108,8 +122,14 @@ const FACTORY_ADDRESS = '0x752c69ee75E7BF58ac478e2aC1F7E7fd341BB865';
 const USDT_ADDRESS = '0x55d398326f99059fF775485246999027B3197955';
 const USDC_ADDRESS = '0x8AC76a51cc950d9822D68b83fE1Ad97b32Cd580d';
 
-const factory = new ethers.Contract(FACTORY_ADDRESS, JSON.parse(require('fs').readFileSync(path.join(__dirname, 'abis/ForjeEscrowFactory.json'))), provider);
-const escrowIface = new ethers.Interface(JSON.parse(require('fs').readFileSync(path.join(__dirname, 'abis/ForjeEscrow.json'))));
+const factoryAbiRaw = await import('./abis/ForjeEscrowFactory.json', { assert: { type: 'json' } });
+const escrowAbiRaw = await import('./abis/ForjeEscrow.json', { assert: { type: 'json' } });
+
+const FACTORY_ABI = factoryAbiRaw.default;
+const ESCROW_ABI = escrowAbiRaw.default;
+
+const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+const escrowIface = new ethers.Interface(ESCROW_ABI);
 
 // ===== BOT =====
 const bot = new Telegraf(BOT_TOKEN);
@@ -165,9 +185,9 @@ async function handleLog(escAddr, log) {
         c.freelancer().catch(() => null),
         c.oracle().catch(() => null)
       ]);
-      if (client) rec.client = client;
-      if (freelancer) rec.freelancer = freelancer;
-      if (oracle) rec.oracle = oracle;
+      rec.client = client || rec.client;
+      rec.freelancer = freelancer || rec.freelancer;
+      rec.oracle = oracle || rec.oracle;
     } catch {}
   }
 
@@ -192,31 +212,274 @@ async function handleLog(escAddr, log) {
     }
     case 'FeePaid': {
       rec.state = 2;
-      await notify(rec.tg_freelancer_id, `Fee Paid — You can now start the job!\nEscrow: ${where}`);
+      await notify(rec.tg_freelancer_id, `Fee Paid 🤑 — You can now start the job!\nEscrow: ${where}`);
+      await notify(rec.tg_client_id, `You paid the fee 🤑 — Freelancer can start.\nEscrow: ${where}`);
       break;
     }
-    // Keep all other cases exactly as in your original code (Started, Submitted, Revised, Approved, Disputed, Resolved)
-    // ... (copy your switch cases here — they remain unchanged, just use rec.tg_client_id etc.)
-    case 'Approved':
-    case 'Resolved':
-      rec.completed = true;
-      totalCompleted += 1;
+    case 'Started': {
+      const [deadline] = parsed.args;
+      const when = new Date(Number(deadline) * 1000).toLocaleString();
+      rec.state = 3;
+      rec.deadline = Number(deadline);
+      await notify(rec.tg_client_id, `Job Started! 🔥⚒️\nDeadline: *${when}*\nEscrow: ${where}`);
+      await notify(rec.tg_freelancer_id, `You started the job 🔥⚒️\nDeadline: *${when}*\nEscrow: ${where}`);
       break;
+    }
+    case 'Submitted': {
+      const [proofHash] = parsed.args;
+      rec.state = 4;
+      await notify(rec.tg_client_id, `Work Submitted! 📄\n\nProof: \`${proofHash}\`\nEscrow: ${where}\n\nPlease review & approve/request revision\n\n💡 *To view the submitted file,* unhash it on [Pinata](https://app.pinata.cloud/auth/signin) by searching for the CID without the "ipfs://" e.g: bafkreieqryqewmspvcdl2f5oq6tydrtybrfjh4zj27ko53fznxp6zazibu, using the search bar`);
+      await notify(rec.tg_freelancer_id, `You submitted proof 📄\nWaiting for client approval/revision request\nEscrow: ${where}`);
+      break;
+    }
+    case 'Revised': {
+      const [messageHash] = parsed.args;
+      rec.state = 4;
+      await notify(rec.tg_freelancer_id, `Revision Requested 📝\n💬 Revision message: \`${messageHash}\`\nPlease resubmit your work\nEscrow: ${where}`);
+      await notify(rec.tg_client_id, `Revision request sent to freelancer 📝\nEscrow: ${where}`);
+      break;
+    }
+    case 'Approved': {
+      const [, deposit, bonus] = parsed.args;
+      const dep = ethers.formatUnits(deposit, 18);
+      const bon = ethers.formatUnits(bonus, 18);
+      await notify(rec.tg_freelancer_id, `APPROVED! ✅\nYou received ${dep} ${tokenSym}\nEscrow: ${where}\nThank you!`);
+      await notify(rec.tg_client_id, `Job approved ✅\nPayment released: ${dep} ${tokenSym}\nEscrow: ${where}`);
+      markEscrowCompleted(escAddr);
+      break;
+    }
+    case 'Disputed': {
+      const [by] = parsed.args;
+      await notify(rec.tg_client_id, `DISPUTE RAISED ⚠️\nEscrow: ${where}\nOracle will review`);
+      await notify(rec.tg_freelancer_id, `DISPUTE RAISED ⚠️\nEscrow: ${where}\nOracle will review`);
+      await notify(rec.tg_oracle_id || DEFAULT_ORACLE_TG_ID, `NEW DISPUTE ⚠️ — REVIEW REQUIRED\nEscrow: ${where}`);
+      await notifyAdmins(`DISPUTE ⚠️: ${escAddr}\nBy: \`${by}\``);
+      break;
+    }
+    case 'Resolved': {
+      const [winner, amount] = parsed.args;
+      const amt = ethers.formatUnits(amount, 18);
+      await notify(rec.tg_client_id, `Dispute Resolved ✅\nWinner: \`${winner}\` — ${amt} ${tokenSym}\nEscrow: ${where}`);
+      await notify(rec.tg_freelancer_id, `Dispute Resolved ✅\nWinner: \`${winner}\` — ${amt} ${tokenSym}\nEscrow: ${where}`);
+      await notify(rec.tg_oracle_id || DEFAULT_ORACLE_TG_ID, `Dispute Resolved ✅\nWinner: \`${winner}\`\nEscrow: ${where}`);
+      markEscrowCompleted(escAddr);
+      break;
+    }
   }
 
   await upsertEscrow(rec);
 }
 
 async function pollOnce() {
-  // ... your existing pollOnce code (factory JobCreated + escrow logs)
-  // Just replace db.escrows with escrowsCache
-  // And save with upsertEscrow
+  try {
+    const latestBlock = await provider.getBlockNumber().catch(() => null);
+    if (!latestBlock) {
+      console.warn('Failed to get latest block — skipping poll');
+      return;
+    }
+
+    let fromBlock = lastBlock + 1;
+    if (latestBlock - fromBlock > 200) {
+      console.log(`Jumping forward from block ${fromBlock} → ${latestBlock - 200}`);
+      fromBlock = latestBlock - 200;
+    }
+    if (fromBlock >= latestBlock) {
+      lastBlock = latestBlock;
+      return;
+    }
+
+    const toBlock = latestBlock - 1;
+
+    // Factory JobCreated
+    try {
+      const jobCreatedTopic = ethers.id('JobCreated(address,address,address)');
+      const factoryLogs = await provider.getLogs({
+        address: FACTORY_ADDRESS,
+        topics: [jobCreatedTopic],
+        fromBlock,
+        toBlock
+      });
+
+      for (const log of factoryLogs) {
+        const parsed = factory.interface.parseLog(log);
+        if (parsed && parsed.name === 'JobCreated') {
+          const [escrowAddr, client, freelancer] = parsed.args;
+          const key = escrowAddr.toLowerCase();
+
+          if (!escrowsCache.has(key)) {
+            const record = {
+              address: escrowAddr,
+              client,
+              freelancer,
+              oracle: null,
+              tg_client_id: null,
+              tg_freelancer_id: null,
+              tg_oracle_id: DEFAULT_ORACLE_TG_ID || null,
+              state: 0,
+              deadline: 0,
+              completed: false
+            };
+            await upsertEscrow(record);
+            console.log(`New escrow auto-logged: ${escrowAddr}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Factory JobCreated log fetch failed:', e.message);
+    }
+
+    // Existing escrows polling
+    const escrows = Array.from(escrowsCache.keys());
+
+    if (escrows.length === 0) {
+      lastBlock = latestBlock;
+      return;
+    }
+
+    for (const esc of escrows) {
+      try {
+        const logs = await provider.getLogs({
+          address: esc,
+          fromBlock,
+          toBlock
+        }).catch(() => []);
+
+        for (const log of logs) {
+          await handleLog(esc, log);
+        }
+      } catch (e) {
+        if (e?.code === 'TIMEOUT' || e?.message?.includes('timeout')) {
+          console.log(`Timeout on ${esc} — skipping this cycle`);
+        } else {
+          console.warn(`Log fetch error for ${esc}:`, e.message || e);
+        }
+      }
+    }
+
+    lastBlock = latestBlock;
+  } catch (err) {
+    console.error('pollOnce critical error:', err.message || err);
+  }
 }
 
-// ===== COMMANDS =====
-// /start, /link, /who, /stats — same logic, just use escrowsCache.get(key)
+// Provider restart
+provider.on('error', async (err) => {
+  console.error('Provider error — restarting provider...', err.message);
+  provider = await createProvider();
+});
 
-// ===== API =====
+// ===== COMMANDS =====
+bot.start(async (ctx) => {
+  await ctx.reply(
+`*Welcome to AfriLance Bot* 🤝
+
+The main app is now at https://afrilance-landing.vercel.app/
+
+To receive Telegram alerts for escrow events (deposits, disputes, approvals), link your Telegram ID using the format below:
+
+\/link <escrowAddress> <yourRole> <yourWalletAddress>
+
+*Link Command Example:*
+Client - /link escrowAddress client yourAddress
+Freelancer - /link escrowAddress freelancer yourAddress`,
+    { parse_mode: 'Markdown', disable_web_page_preview: true }
+  );
+});
+
+bot.command('link', async (ctx) => {
+  const [_, esc, role, addr] = ctx.message.text.trim().split(/\s+/);
+  if (!esc || !role || !addr) return ctx.reply('Usage: /link <escrow> <client|freelancer|oracle> <address>');
+  if (!ethers.isAddress(esc) || !ethers.isAddress(addr)) return ctx.reply('Invalid address');
+  const r = role.toLowerCase();
+  if (!['client', 'freelancer', 'oracle'].includes(r)) return ctx.reply('Role: client|freelancer|oracle');
+  if (r === 'oracle' && !ADMIN_TG_IDS.includes(String(ctx.from.id))) return ctx.reply('Only admin can link oracle');
+  const key = esc.toLowerCase();
+  let rec = escrowsCache.get(key);
+  if (!rec) {
+    rec = {
+      address: esc,
+      state: 0,
+      client: null,
+      freelancer: null,
+      oracle: null,
+      tg_client_id: null,
+      tg_freelancer_id: null,
+      tg_oracle_id: null,
+      deadline: 0,
+      completed: false
+    };
+    escrowsCache.set(key, rec);
+  }
+  rec[r] = addr;
+  rec[`tg_${r}_id`] = ctx.from.id;
+  await upsertEscrow(rec);
+  ctx.reply(`✅ Linked\n*Escrow:* ${formatAddress(esc)}\n*Role:* ${r}\n*Wallet:* ${formatAddress(addr)}\nNow you will get escrow event alerts.`, { parse_mode: 'Markdown' });
+});
+
+bot.command('who', async (ctx) => {
+  const esc = ctx.message.text.split(' ')[1];
+  if (!ethers.isAddress(esc)) return ctx.reply('Usage: /who <escrow>');
+  const rec = escrowsCache.get(esc.toLowerCase()) || {};
+  const oracleTg = rec.tg_oracle_id || DEFAULT_ORACLE_TG_ID || '—';
+  await ctx.reply(
+`*Escrow:* ${formatAddress(esc)}
+Client: ${formatAddress(rec.client)} \\(tg: \`${rec.tg_client_id || '—'}\`\\)
+Freelancer: ${formatAddress(rec.freelancer)} \\(tg: \`${rec.tg_freelancer_id || '—'}\`\\)
+Oracle: ${formatAddress(rec.oracle)} \\(tg: \`${oracleTg}\`\\)`,
+    { parse_mode: 'MarkdownV2' }
+  );
+});
+
+bot.command('stats', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const isPrivileged = ADMIN_TG_IDS.includes(String(userId)) ||
+                         ORACLE_ALERT_TG_IDS.includes(String(userId)) ||
+                         String(userId) === DEFAULT_ORACLE_TG_ID;
+
+    const now = Math.floor(Date.now() / 1000);
+    const active = [], completed = [], expired = [];
+
+    const escrowsToCheck = isPrivileged
+      ? Array.from(escrowsCache.values())
+      : Array.from(escrowsCache.values()).filter(d => d.tg_client_id === userId || d.tg_freelancer_id === userId);
+
+    for (const e of escrowsToCheck) {
+      const isExpired = e.state < 2 && e.deadline > 0 && now > e.deadline + 86400 * 3;
+      if (e.completed) completed.push(e);
+      else if (isExpired) expired.push(e);
+      else active.push(e);
+    }
+
+    const totalEver = escrowsToCheck.length + totalCompleted;
+    const format = (e) => `\`${e.address}\` — [view](${explorer(e.address)})`;
+
+    let text = isPrivileged ? `*GLOBAL ESCROW STATS* \\(BSC MAINNET\\)\n\n` : `*YOUR ESCROW STATS*\n\n`;
+    text += `*Total Jobs Ever:* \`${totalEver}\`\n`;
+    text += `*Active:* \`${active.length}\` \\| *Completed:* \`${completed.length + totalCompleted}\` \\| *Expired:* \`${expired.length}\`\n\n`;
+
+    if (active.length) text += `*Active Escrows*\n${active.map(format).join('\n')}\n\n`;
+    if (completed.length || totalCompleted) {
+      text += `*Completed Escrows*`;
+      if (completed.length) text += `\n${completed.slice(-10).map(format).join('\n')}`;
+      if (totalCompleted > completed.length) text += `\n\\+ ${totalCompleted - completed.length} older completed jobs`;
+      text += `\n\n`;
+    }
+    if (expired.length) text += `*Expired \\(Unfunded\\)*\n${expired.map(format).join('\n')}\n\n`;
+
+    if (active.length + completed.length + expired.length === 0) {
+      text += isPrivileged ? "No escrows yet\\." : "😏 You have no escrows yet\\.";
+    } else {
+      text += `Hardwork pays 🤝\\.`;
+    }
+
+    await ctx.reply(text, { parse_mode: 'MarkdownV2', disable_web_page_preview: true });
+  } catch (err) {
+    ctx.reply('Stats temporarily unavailable.');
+  }
+});
+
+// ===== API FOR WEB "My Escrows" =====
 app.get('/api/my-escrows', async (req, res) => {
   try {
     const { address } = req.query;
@@ -240,7 +503,7 @@ app.get('/api/my-escrows', async (req, res) => {
       freelancer: row.freelancer,
     }));
 
-    escrows.sort((a, b) => b.isActive - a.isActive);
+    escrows.sort((a, b) => (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
 
     res.json({ escrows });
   } catch (err) {
@@ -250,8 +513,17 @@ app.get('/api/my-escrows', async (req, res) => {
 });
 
 // ===== LAUNCH =====
-bot.launch();
+console.log('AFRILANCE BOT v10 — SUPABASE PERSISTENT');
+console.log(`Completed jobs: ${totalCompleted}`);
+
+bot.launch({ dropPendingUpdates: true })
+  .then(() => console.log('Bot launched'))
+  .catch(err => console.error('Bot failed to start:', err));
+
 setInterval(pollOnce, 30000);
 pollOnce();
 
-app.listen(PORT, () => console.log(`Server on ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
