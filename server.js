@@ -474,12 +474,12 @@ bot.command('who', async (ctx) => {
   const oracleTg = rec.tgOracleId || DEFAULT_ORACLE_TG_ID || '—';
   await ctx.reply(
 
-`*WHO GETS NOTIFIED OF THIS ESCROW EVENTS*
+`*WHO GETS NOTIFIED* 🔔
 
 *ESCROW:* ${formatAddress(esc)}
-*Client:* ${formatAddress(rec.client)} \\*| tg:* \`${rec.tgClientId || '—'}\`\\)
-*Freelancer:* ${formatAddress(rec.freelancer)} \\*| tg:* \`${rec.tgFreelancerId || '—'}\`\\)
-*Oracle:* ${formatAddress(rec.oracle)} \\*| tg:* \`${oracleTg}\`\\)`,
+\n*Client:* ${formatAddress(rec.client)} \\(*tg:* \`${rec.tgClientId || '—'}\`\\)
+*Freelancer:* ${formatAddress(rec.freelancer)} \\(*tg:* \`${rec.tgFreelancerId || '—'}\`\\)
+*Oracle:* ${formatAddress(rec.oracle)} \\(*tg:* \`${oracleTg}\`\\)`,
     { parse_mode: 'MarkdownV2' }
   );
 });
