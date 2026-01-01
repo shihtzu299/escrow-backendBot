@@ -473,10 +473,13 @@ bot.command('who', async (ctx) => {
   const rec = db.escrows[esc.toLowerCase()] || {};
   const oracleTg = rec.tgOracleId || DEFAULT_ORACLE_TG_ID || '—';
   await ctx.reply(
-`*Escrow:* ${formatAddress(esc)}
-Client: ${formatAddress(rec.client)} \\(tg: \`${rec.tgClientId || '—'}\`\\)
-Freelancer: ${formatAddress(rec.freelancer)} \\(tg: \`${rec.tgFreelancerId || '—'}\`\\)
-Oracle: ${formatAddress(rec.oracle)} \\(tg: \`${oracleTg}\`\\)`,
+
+`*WHO GETS NOTIFIED OF THIS ESCROW EVENTS*
+
+*ESCROW:* ${formatAddress(esc)}
+*Client:* ${formatAddress(rec.client)} \\*| tg:* \`${rec.tgClientId || '—'}\`\\)
+*Freelancer:* ${formatAddress(rec.freelancer)} \\*| tg:* \`${rec.tgFreelancerId || '—'}\`\\)
+*Oracle:* ${formatAddress(rec.oracle)} \\*| tg:* \`${oracleTg}\`\\)`,
     { parse_mode: 'MarkdownV2' }
   );
 });
