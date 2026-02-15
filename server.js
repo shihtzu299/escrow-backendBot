@@ -1,26 +1,34 @@
-// server.js — AfriLance BOT v9.3 — SUPABASE PERSISTENT
-import 'dotenv/config';
-import http from 'http';
-import { Telegraf, Markup } from 'telegraf';
-import { ethers } from 'ethers';
-import fs from 'fs-extra';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { createClient } from '@supabase/supabase-js';  // ← NEW
+import "dotenv/config";
+import http from "http";
+import { Telegraf } from "telegraf";
+import { ethers } from "ethers";
+import fs from "fs-extra";
+import path from "path";
+import { fileURLToPath } from "url";
+import { createClient } from "@supabase/supabase-js";
+import { CHAINS } from "./chains.js";
 
 // ===== CONFIG =====
 const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
 const PRIVATE_KEY = process.env.PRIVATE_KEY?.trim();
 
-const ADMIN_TG_IDS = (process.env.ADMIN_TG_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
-const DEFAULT_ORACLE_TG_ID = (process.env.DEFAULT_ORACLE_TG_ID || '').trim();
-const ORACLE_ALERT_TG_IDS = (process.env.ORACLE_ALERT_TG_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const ADMIN_TG_IDS = (process.env.ADMIN_TG_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const DEFAULT_ORACLE_TG_ID = (process.env.DEFAULT_ORACLE_TG_ID || "").trim();
+const ORACLE_ALERT_TG_IDS = (process.env.ORACLE_ALERT_TG_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const SUPABASE_URL = process.env.SUPABASE_URL?.trim();
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
 
 if (!BOT_TOKEN || !PRIVATE_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('FATAL: Missing BOT_TOKEN, PRIVATE_KEY, SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+  console.error(
+    "FATAL: Missing BOT_TOKEN, PRIVATE_KEY, SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
+  );
   process.exit(1);
 }
 
@@ -28,8 +36,8 @@ if (!BOT_TOKEN || !PRIVATE_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const dummyServer = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('AfriLance Bot is running (polling mode)');
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("AfriLance Bot is running (polling mode)");
 });
 
 const PORT = process.env.PORT || 10000;
@@ -40,96 +48,405 @@ dummyServer.listen(PORT, () => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ===== MULTIPLE RPC PROVIDERS WITH TIMEOUT & FAILOVER =====
-const RPC_URLS = [
-  process.env.RPC_URL?.trim(),
-  'https://bsc-dataseed.bnbchain.org',
-  'https://bsc-rpc.publicnode.com',
-  'https://bsc-dataseed1.binance.org',
-  'https://bsc-dataseed2.binance.org',
-  'https://bsc-dataseed3.binance.org'
-].filter(Boolean);
+// ===== MULTI-CHAIN RPC PROVIDERS WITH TIMEOUT & FAILOVER =====
+const providers = {}; // chainId -> provider
 
-let provider;
+function isRpcTimeout(err) {
+  const msg = String(err?.message || err).toLowerCase();
+  return (
+    msg.includes("timeout") ||
+    msg.includes("timed out") ||
+    err?.code === "TIMEOUT" ||
+    err?.code === "ETIMEDOUT"
+  );
+}
 
-async function createProvider() {
-  for (const url of RPC_URLS) {
+async function createProvider(chainId) {
+  const cid = Number(chainId);
+  const cfg = CHAINS[cid];
+  if (!cfg) throw new Error(`Unknown chainId ${cid} in CHAINS`);
+
+  // Allow optional env overrides (nice for emergencies)
+  const envRpc =
+    cid === 97
+      ? process.env.RPC_URL?.trim()
+      : cid === 84532
+        ? process.env.BASE_RPC_URL?.trim()
+        : null;
+
+  const rpcUrls = [envRpc, ...(cfg.rpcUrls || [])].filter(Boolean);
+
+  // ✅ Provide explicit network to avoid ethers “failed to detect network” spam
+  const network = { name: cfg.name || `chain-${cid}`, chainId: cid };
+
+  for (const url of rpcUrls) {
     try {
-      console.log(`Trying RPC: ${url}`);
-      const prov = new ethers.JsonRpcProvider(url, undefined, {
+      console.log(`[${cfg.name}] Trying RPC: ${url}`);
+
+      const prov = new ethers.JsonRpcProvider(url, network, {
         pollingInterval: 12000,
-        timeout: 10000, // Critical: prevent hanging
+        timeout: 15000, // a bit more forgiving
       });
+
+      // Verify connection
       await prov.getBlockNumber();
-      console.log(`RPC CONNECTED & VERIFIED: ${url}`);
+      console.log(`[${cfg.name}] RPC CONNECTED & VERIFIED: ${url}`);
       return prov;
     } catch (e) {
-      console.warn(`RPC failed: ${url} → ${e.message}`);
+      console.warn(`[${cfg.name}] RPC failed: ${url} → ${e.message}`);
     }
   }
-  console.warn('All RPCs failed. Using fallback...');
-  return new ethers.JsonRpcProvider('https://bsc-dataseed.bnbchain.org', undefined, {
+
+  const fallback = cfg.rpcUrls && cfg.rpcUrls[0] ? cfg.rpcUrls[0] : null;
+  if (!fallback) throw new Error(`[${cfg.name}] No RPC URLs available`);
+
+  console.warn(`[${cfg.name}] All RPCs failed. Using fallback: ${fallback}`);
+
+  return new ethers.JsonRpcProvider(fallback, network, {
     pollingInterval: 15000,
-    timeout: 12000,
+    timeout: 18000,
   });
 }
 
-provider = await createProvider();
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+async function getProvider(chainId) {
+  const cid = Number(chainId);
+  if (!providers[cid]) {
+    providers[cid] = await createProvider(cid);
+  }
+  return providers[cid];
+}
 
-// ===== CONTRACTS =====
-const FACTORY_ADDRESS = '0x752c69ee75E7BF58ac478e2aC1F7E7fd341BB865';
-const USDT_ADDRESS    = '0x55d398326f99059fF775485246999027B3197955';
-const USDC_ADDRESS    = '0x8AC76a51cc950d9822D68b83fE1Ad97b32Cd580d';
+function resetProvider(chainId) {
+  const cid = Number(chainId);
+  delete providers[cid];
+}
 
-const FACTORY_ABI = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrowFactory.json'), 'utf8'));
-const ESCROW_ABI  = JSON.parse(fs.readFileSync(path.join(__dirname, 'abis/ForjeEscrow.json'), 'utf8'));
+const FACTORY_ABI = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "abis/AfriLanceFactory.json"), "utf8"),
+);
+const ESCROW_ABI = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "abis/AfriLanceEscrow.json"), "utf8"),
+);
 
-const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, wallet);
+// How far back we allow log queries (prevents "pruned logs" failures)
+const SAFE_WINDOW_BY_CHAIN = {
+  97: 50_000, // BNB testnet
+  84532: 120_000, // Base sepolia
+};
+
+function clampFromBlock(chainId, fromBlock, currentBlock) {
+  const window = SAFE_WINDOW_BY_CHAIN[chainId] ?? 50_000;
+  const minBlock = Math.max(0, Number(currentBlock) - window);
+  return Math.max(Number(fromBlock ?? 0), minBlock);
+}
+
+// ===== ERC20 META (decimals/symbol) =====
+const ERC20_META_ABI = [
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+];
+
+// cache: `${chainId}:${tokenLower}` -> { decimals, symbol }
+const tokenMetaCache = new Map();
+
+async function getTokenMeta(chainId, provider, tokenAddr) {
+  const key = `${chainId}:${String(tokenAddr).toLowerCase()}`;
+  if (tokenMetaCache.has(key)) return tokenMetaCache.get(key);
+
+  const c = new ethers.Contract(tokenAddr, ERC20_META_ABI, provider);
+
+  // decimals is the important one; default to 18 if anything fails
+  const [decimals, symbol] = await Promise.all([
+    c.decimals().catch(() => 18),
+    c.symbol().catch(() => ""),
+  ]);
+
+  const meta = {
+    decimals: Number(decimals) || 18,
+    symbol: String(symbol || ""),
+  };
+  tokenMetaCache.set(key, meta);
+  return meta;
+}
+
+async function getSettlementMeta(chainId, provider, escAddr) {
+  const esc = new ethers.Contract(escAddr, ESCROW_ABI, provider);
+  const tokenAddr = await esc.settlementToken();
+
+  const cfg = CHAINS[chainId] || {};
+  const usdt = String(cfg.usdt || "").toLowerCase();
+  const usdc = String(cfg.usdc || "").toLowerCase();
+  const t = String(tokenAddr || "").toLowerCase();
+
+  // label is based on config, decimals comes from token itself (safe + accurate)
+  let label = "TOKEN";
+  if (usdt && t === usdt) label = "USDT";
+  if (usdc && t === usdc) label = "USDC";
+
+  const meta = await getTokenMeta(chainId, provider, tokenAddr);
+
+  return {
+    tokenAddr,
+    tokenSym: label || meta.symbol || "TOKEN",
+    tokenDecimals: meta.decimals,
+  };
+}
+
+// ===== WATCHER SETTINGS =====
+const CONFIRMATIONS = 2; // process up to latest - CONFIRMATIONS
+const MAX_RANGE = 2000; // max blocks per chunk
+const POLL_INTERVAL_MS = 15000;
+
+// Interfaces
+const factoryIface = new ethers.Interface(FACTORY_ABI);
 const escrowIface = new ethers.Interface(ESCROW_ABI);
+
 const TOKEN_DECIMALS = 18;
 
 const bot = new Telegraf(BOT_TOKEN);
 
 // ===== HELPERS =====
-const formatAddress = (addr) => addr ? `\`${addr.slice(0, 8)}…${addr.slice(-6)}\`` : '`—`';
-const explorer = (addr) => `https://bscscan.com/address/${addr}#code`;
+const formatAddress = (addr) =>
+  addr ? `\`${addr.slice(0, 8)}…${addr.slice(-6)}\`` : "`—`";
+const explorer = (addr) => `https://testnet.bscscan.com/address/${addr}#code`;
 const writeLink = (addr) => `${explorer(addr)}#writeContract`;
 const code = (text) => `\`\`\`\n${text}\n\`\`\``;
+const escapeMdV2 = (s = "") =>
+  String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 
 // ===== DATABASE — SUPABASE + LOCAL CACHE =====
-let db = { lastBlock: 0, escrows: {}, stats: { totalCompleted: 0 } };
+let db = { escrowsByChain: {}, stats: { totalCompleted: 0 } };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function withRetry(fn, label, tries = 3) {
+  let lastErr;
+  for (let i = 1; i <= tries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || e);
+      console.warn(`[retry] ${label} failed (${i}/${tries}): ${msg}`);
+      await sleep(400 * i);
+    }
+  }
+  throw lastErr;
+}
+
+function isTransientFetchError(err) {
+  const msg = String(err?.message || err).toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("network") ||
+    msg.includes("econnreset") ||
+    msg.includes("socket") ||
+    msg.includes("timed out") ||
+    msg.includes("timeout")
+  );
+}
+
+async function postgrestWithRetry(fn, label, tries = 3) {
+  return await withRetry(
+    async () => {
+      const res = await fn(); // may throw
+      // If Supabase returns an error object, retry only for transient/network-ish cases
+      if (res?.error && isTransientFetchError(res.error)) {
+        throw res.error;
+      }
+      return res;
+    },
+    label,
+    tries,
+  );
+}
+
+// --- chain_sync cursor helpers (per-chain) ---
+async function getChainCursor(chainId) {
+  const cid = Number(chainId);
+
+  try {
+    const { data, error } = await postgrestWithRetry(
+      () =>
+        supabase
+          .from("chain_sync")
+          .select("last_block, last_block_hash")
+          .eq("chain_id", cid)
+          .maybeSingle(),
+      `chain_sync read cid=${cid}`,
+      3,
+    );
+
+    if (error) {
+      console.error(
+        `[chain_sync] read failed for chain ${cid}:`,
+        error.message,
+      );
+      return { lastBlock: 0, lastHash: null };
+    }
+
+    if (!data?.last_block) return { lastBlock: 0, lastHash: null };
+
+    return {
+      lastBlock: Number(data.last_block),
+      lastHash: data.last_block_hash ? String(data.last_block_hash) : null,
+    };
+  } catch (e) {
+    // ✅ handles "TypeError: fetch failed" thrown by undici/fetch
+    console.error(
+      `[chain_sync] read crashed for chain ${cid}:`,
+      e?.message || e,
+    );
+    return { lastBlock: 0, lastHash: null };
+  }
+}
+
+async function setChainCursor(chainId, lastBlock, lastHash) {
+  const cid = Number(chainId);
+  const lb = Number(lastBlock);
+
+  try {
+    const { error } = await postgrestWithRetry(
+      () =>
+        supabase.from("chain_sync").upsert(
+          {
+            chain_id: cid,
+            last_block: lb,
+            last_block_hash: lastHash || null,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "chain_id" },
+        ),
+      `chain_sync upsert cid=${cid} lb=${lb}`,
+      3,
+    );
+
+    if (error) {
+      console.error(
+        `[chain_sync] write failed for chain ${cid} block ${lb}:`,
+        error.message,
+      );
+    }
+  } catch (e) {
+    console.error(
+      `[chain_sync] write crashed for chain ${cid} block ${lb}:`,
+      e?.message || e,
+    );
+  }
+}
+
+const REORG_REWIND = 120; // safe rewind window (testnets can reorg)
+
+async function getBlockHashSafe(provider, blockNumber) {
+  try {
+    const b = await provider.getBlock(blockNumber);
+    return b?.hash || null;
+  } catch {
+    return null;
+  }
+}
+
+// tiny helper
+function escrowRowId(chainId, escrowAddrLower) {
+  return `${Number(chainId)}:${escrowAddrLower}`;
+}
+
+function padLogIndex(i) {
+  const n = Number(i ?? 0);
+  return String(n).padStart(6, "0");
+}
 
 async function loadDb() {
-  try {
-    const { data, error } = await supabase
-      .from('escrows')
-      .select('id, data')
-      .order('updated_at', { ascending: false });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const { data, error } = await supabase
+        .from("escrows")
+        .select(
+          "id, chain_id, escrow_address, data, updated_at, created_block, last_scanned_block",
+        )
+        .neq("id", "__global__");
 
-    if (error) throw error;
+      if (error) throw error;
 
-    let completed = 0;
-    const escrows = {};
+      const escrowsByChain = {}; // chainId -> { [escrowLower]: record }
+      let completed = 0;
 
-    data.forEach(row => {
-      const key = row.id;
-      const record = row.data;
-      if (record.completed) {
-        completed++;
-      } else {
-        escrows[key] = record;
+      // If we discover rows that should be "completed" but aren't marked, we'll fix them.
+      const finalizeOps = [];
+
+      for (const row of data || []) {
+        const record = row.data || {};
+        const chainId = Number(row.chain_id);
+
+        if (!chainId || !row.escrow_address) continue;
+
+        const escLower = String(row.escrow_address).toLowerCase();
+
+        // hydrate scan cursors from columns (not inside data blob)
+        record.created_block = row.created_block
+          ? Number(row.created_block)
+          : 0;
+        record.last_scanned_block = row.last_scanned_block
+          ? Number(row.last_scanned_block)
+          : 0;
+
+        // ✅ Reconcile: if state is final but completed flag is missing, mark completed.
+        // (Your system treats `completed: true` as the real completed marker.)
+        const isFinalState = record.state === 3 || record.state === 6;
+        if (!record.completed && isFinalState) {
+          record.completed = true;
+
+          finalizeOps.push(
+            upsertEscrowRow(chainId, escLower, {
+              ...record,
+              completed: true,
+            }),
+          );
+        }
+
+        if (record.completed) {
+          completed++;
+          continue;
+        }
+
+        if (!escrowsByChain[chainId]) escrowsByChain[chainId] = {};
+        escrowsByChain[chainId][escLower] = record;
       }
-    });
 
-    db.escrows = escrows;
-    db.stats.totalCompleted = completed;
-    db.lastBlock = Math.max(...data.map(r => r.data.lastBlock || 0), 0);
+      // persist any reconciliation writes
+      if (finalizeOps.length) {
+        await Promise.allSettled(finalizeOps);
+      }
 
-    console.log(`Supabase loaded: ${Object.keys(escrows).length} active | ${completed} completed`);
-  } catch (err) {
-    console.error('Supabase load failed:', err.message);
-    console.log('Falling back to empty state');
+      db.escrowsByChain = escrowsByChain;
+      db.stats.totalCompleted = completed;
+
+      const activeCount = Object.values(escrowsByChain).reduce(
+        (acc, m) => acc + Object.keys(m).length,
+        0,
+      );
+
+      console.log(
+        `Supabase loaded: ${activeCount} active | ${completed} completed`,
+      );
+      return;
+    } catch (err) {
+      const msg = String(err?.message || err);
+      const isFetchFail =
+        msg.toLowerCase().includes("fetch failed") ||
+        msg.toLowerCase().includes("network");
+
+      console.error(`Supabase load failed (attempt ${attempt}/3):`, msg);
+
+      if (attempt < 3 && isFetchFail) {
+        await sleep(2000);
+        continue;
+      }
+
+      console.log("Falling back to empty state");
+      db.escrowsByChain = {};
+      return;
+    }
   }
 }
 
@@ -137,32 +454,37 @@ async function saveDb() {
   try {
     const ops = [];
 
-    // Save active escrows
-    for (const [key, record] of Object.entries(db.escrows)) {
-      ops.push(
-        supabase
-          .from('escrows')
-          .upsert({
-            id: key,
-            data: { ...record, lastBlock: db.lastBlock }
-          }, { onConflict: 'id' })
-      );
+    // Save active escrows per chain
+    for (const [chainIdStr, map] of Object.entries(db.escrowsByChain || {})) {
+      const chainId = Number(chainIdStr);
+
+      for (const [escLower, record] of Object.entries(map || {})) {
+        const id = escrowRowId(chainId, escLower);
+
+        ops.push(
+          supabase.from("escrows").upsert(
+            {
+              id,
+              chain_id: chainId,
+              escrow_address: escLower,
+              data: {
+                ...record,
+                // keep all existing keys, but avoid duplicating cursor columns inside json
+                created_block: undefined,
+                last_scanned_block: undefined,
+                updated_at: new Date().toISOString(),
+              },
+            },
+            { onConflict: "id" },
+          ),
+        );
+      }
     }
 
-    // Save completed count via a special row
-    ops.push(
-      supabase
-        .from('escrows')
-        .upsert({
-          id: '__stats__',
-          data: { totalCompleted: db.stats.totalCompleted, lastBlock: db.lastBlock }
-        }, { onConflict: 'id' })
-    );
-
     await Promise.all(ops);
-    console.log('Supabase sync complete');
+    console.log("Supabase sync complete");
   } catch (err) {
-    console.error('Supabase save failed:', err.message);
+    console.error("Supabase save failed:", err.message);
   }
 }
 
@@ -173,48 +495,522 @@ await loadDb();
 async function notify(id, text) {
   if (!id) return;
   try {
-    await bot.telegram.sendMessage(id, text, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    await bot.telegram.sendMessage(id, text, {
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+    });
   } catch (e) {
     console.error(`Notify failed (${id}):`, e.message);
   }
 }
 
 async function notifyAdmins(text) {
-  const ids = new Set([...ORACLE_ALERT_TG_IDS, DEFAULT_ORACLE_TG_ID].filter(Boolean));
+  const ids = new Set(
+    [...ORACLE_ALERT_TG_IDS, DEFAULT_ORACLE_TG_ID].filter(Boolean),
+  );
   for (const id of ids) await notify(id, text);
 }
 
-function labelEscrow(esc) { return `\`${esc}\` — [view](${explorer(esc)})`; }
+function labelEscrow(esc) {
+  return `\`${esc}\` — [view](${explorer(esc)})`;
+}
 
-function markEscrowCompleted(escAddr) {
-  const key = escAddr.toLowerCase();
-  if (db.escrows[key]) {
-    delete db.escrows[key];
-    db.stats.totalCompleted += 1;
-    console.log(`COMPLETED #${db.stats.totalCompleted}: ${escAddr}`);
-    saveDb();  // ← now async, but fire-and-forget
+async function markEscrowCompleted(chainId, escAddr) {
+  const escLower = escAddr.toLowerCase();
+
+  const rec = db.escrowsByChain?.[chainId]?.[escLower];
+  if (!rec) {
+    console.warn(
+      `${chainTag(chainId)} markEscrowCompleted: no local record for ${escAddr}`,
+    );
+    return;
+  }
+
+  try {
+    rec.completed = true; // ✅ make local state match the DB immediately
+
+    await upsertEscrowRow(chainId, escLower, {
+      ...rec,
+      completed: true,
+    });
+
+    console.log(`${chainTag(chainId)} Completed escrow saved: ${escAddr}`);
+  } catch (err) {
+    console.error(`${chainTag(chainId)} Failed to save completed escrow:`, err);
+    return; // ✅ do NOT delete from active map if DB didn't confirm
+  }
+
+  // remove from active cache
+  delete db.escrowsByChain[chainId][escLower];
+  db.stats.totalCompleted += 1;
+  console.log(
+    `${chainTag(chainId)} COMPLETED #${db.stats.totalCompleted}: ${escAddr}`,
+  );
+}
+
+function isZeroAddress(a) {
+  return (
+    !a ||
+    String(a).toLowerCase() === "0x0000000000000000000000000000000000000000"
+  );
+}
+
+function parseChainArg(raw) {
+  const v = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (!v) return null;
+
+  if (v === "97" || v === "bnb" || v === "bsc" || v === "bsc-testnet")
+    return 97;
+  if (v === "84532" || v === "base" || v === "base-sepolia") return 84532;
+
+  return null;
+}
+
+// Try to figure out which chain an escrow lives on.
+// Priority: already-known in db → otherwise on-chain probe.
+async function detectChainForEscrow(escAddrLower) {
+  // 1) already in db
+  for (const chainIdStr of Object.keys(db.escrowsByChain || {})) {
+    const chainId = Number(chainIdStr);
+    if (db.escrowsByChain?.[chainId]?.[escAddrLower]) return chainId;
+  }
+
+  // 2) probe chains by calling client() (cheap, read-only)
+  const chainIds = Object.keys(CHAINS || {}).map((k) => Number(k));
+  for (const chainId of chainIds) {
+    try {
+      const prov = await getProvider(chainId);
+      const c = new ethers.Contract(
+        ethers.getAddress(escAddrLower),
+        ESCROW_ABI,
+        prov,
+      );
+      const client = await c.client();
+      if (client && ethers.isAddress(client) && !isZeroAddress(client)) {
+        return chainId;
+      }
+    } catch {
+      // ignore and try next chain
+    }
+  }
+
+  return null;
+}
+
+function allActiveEscrowsFlat() {
+  const out = [];
+  for (const [chainIdStr, map] of Object.entries(db.escrowsByChain || {})) {
+    const chainId = Number(chainIdStr);
+    for (const [escLower, rec] of Object.entries(map || {})) {
+      out.push({ chainId, escLower, rec });
+    }
+  }
+  return out;
+}
+
+function chainTag(chainId) {
+  return CHAINS[chainId]?.name
+    ? `[${CHAINS[chainId].name}]`
+    : `[chain ${chainId}]`;
+}
+
+function nativeSymbol(chainId) {
+  const cid = Number(chainId);
+  return CHAINS[cid]?.nativeSymbol || "NATIVE";
+}
+
+function explorerAddr(chainId, addr) {
+  const cfg = CHAINS[chainId];
+  return cfg?.explorerAddr ? cfg.explorerAddr(addr) : addr;
+}
+
+function labelEscrowChain(chainId, escAddr) {
+  return `\`${escAddr}\` — [view](${explorerAddr(chainId, escAddr)})`;
+}
+
+function ensureEscrowLocal(chainId, escAddrLower) {
+  if (!db.escrowsByChain[chainId]) db.escrowsByChain[chainId] = {};
+  if (!db.escrowsByChain[chainId][escAddrLower]) {
+    db.escrowsByChain[chainId][escAddrLower] = {
+      // per-escrow scan anchors (prevents huge getLogs ranges)
+      created_block: 0,
+      last_scanned_block: 0,
+
+      state: 0,
+      deadline: 0,
+      completed: false,
+      client: null,
+      freelancer: null,
+      oracle: null,
+      tgClientId: null,
+      tgFreelancerId: null,
+      tgOracleId: DEFAULT_ORACLE_TG_ID || null,
+
+      // dispute fields (UMA Base only)
+      disputeStart: 0,
+      DISPUTE_GRACE: 0,
+      disputeAssertionId:
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+      disputeAssertionExpiration: 0,
+    };
+  }
+  return db.escrowsByChain[chainId][escAddrLower];
+}
+
+function toPublicEscrowData(rec) {
+  // remove telegram IDs + noisy internal fields from public exposure
+  const clone = { ...rec };
+  delete clone.tgClientId;
+  delete clone.tgFreelancerId;
+  delete clone.tgOracleId;
+  delete clone._recentLogs;
+  return clone;
+}
+
+async function upsertEscrowPublicRow(
+  chainId,
+  escAddrLower,
+  partialData,
+  logMeta = null,
+) {
+  const id = escrowRowId(chainId, escAddrLower);
+
+  const lastEventBlock =
+    Number(logMeta?.blockNumber ?? 0) ||
+    Number(partialData?.last_scanned_block || 0) ||
+    Number(partialData?.created_block || 0) ||
+    0;
+
+  const lastEventKey = logMeta?.transactionHash
+    ? `${logMeta.transactionHash}:${padLogIndex(logMeta.logIndex ?? logMeta.index ?? 0)}`
+    : String(logMeta?.fallbackKey || "");
+
+  const { error } = await supabase.rpc("upsert_escrows_public_guarded", {
+    p_id: id,
+    p_chain_id: Number(chainId),
+    p_escrow_address: escAddrLower,
+    p_data: toPublicEscrowData({
+      ...partialData,
+      updated_at: new Date().toISOString(),
+    }),
+    p_last_event_block: lastEventBlock,
+    p_last_event_key: lastEventKey,
+  });
+
+  if (error) {
+    console.error(
+      `${chainTag(chainId)} upsert escrows_public failed ${id}:`,
+      error.message,
+    );
   }
 }
 
-// ===== handleLog — now uses checksummed addresses safely =====
-async function handleLog(escAddr, log) {
+async function upsertEscrowRow(chainId, escAddrLower, partialData) {
+  const cid = Number(chainId); // ✅ force integer once
+
+  const id = escrowRowId(cid, escAddrLower);
+
+  const createdBlock = Number(partialData?.created_block || 0) || null;
+  const lastScanned = Number(partialData?.last_scanned_block || 0) || null;
+
+  const { error } = await supabase.from("escrows").upsert(
+    {
+      id,
+      chain_id: cid, // ✅ always integer
+      escrow_address: escAddrLower,
+
+      // columns
+      created_block: createdBlock,
+      last_scanned_block: lastScanned,
+
+      // json blob
+      data: {
+        ...partialData,
+        updated_at: new Date().toISOString(),
+      },
+    },
+    { onConflict: "id" },
+  );
+
+  if (error) {
+    console.error(
+      `${chainTag(cid)} upsert escrow failed ${id}:`,
+      error.message,
+    );
+    throw error;
+  }
+}
+
+async function discoverFactoryJobs(chainId, provider, fromBlock, toBlock) {
+  const cfg = CHAINS[chainId];
+  const factory = cfg.factory;
+
+  // topic for JobCreated(address indexed escrow, address client, address freelancer)
+  const jobCreatedTopic = factoryIface.getEvent("JobCreated").topicHash;
+
+  // ✅ clamp the factory scan range to a safe window to avoid pruned history
+  const head = await provider.getBlockNumber().catch(() => toBlock);
+  const safeFrom = clampFromBlock(chainId, fromBlock, head);
+  const safeTo = Math.max(safeFrom, Number(toBlock));
+
+  const logs = await provider
+    .getLogs({
+      address: factory,
+      fromBlock: safeFrom,
+      toBlock: safeTo,
+      topics: [jobCreatedTopic],
+    })
+    .catch(() => []);
+
+  for (const log of logs) {
+    let parsed;
+    try {
+      parsed = factoryIface.parseLog(log);
+    } catch {
+      continue;
+    }
+
+    if (!parsed || parsed.name !== "JobCreated") continue;
+
+    const escrowAddr = ethers.getAddress(parsed.args.escrow);
+    const client = parsed.args.client
+      ? ethers.getAddress(parsed.args.client)
+      : null;
+    const freelancer = parsed.args.freelancer
+      ? ethers.getAddress(parsed.args.freelancer)
+      : null;
+
+    const escLower = escrowAddr.toLowerCase();
+
+    const createdBlock = Number(log.blockNumber || 0);
+
+    // local cache
+    const rec = ensureEscrowLocal(chainId, escLower);
+
+    // store per-escrow scan anchors
+    if (!rec.created_block || rec.created_block === 0)
+      rec.created_block = createdBlock;
+
+    // IMPORTANT: initialize last_scanned_block close to creation so we don't scan ancient pruned ranges
+    if (!rec.last_scanned_block || rec.last_scanned_block === 0) {
+      rec.last_scanned_block = Math.max(createdBlock - 5, 0); // small overlap
+    }
+
+    // store basics immediately
+    rec.client = rec.client || client;
+    rec.freelancer = rec.freelancer || freelancer;
+
+    // ✅ anchor scanning to escrow creation block
+    const createdAt = Number(log.blockNumber || 0);
+    if (createdAt > 0) {
+      if (!rec.created_block || rec.created_block === 0)
+        rec.created_block = createdAt;
+
+      // start scanning escrow logs from the block right after creation
+      if (!rec.last_scanned_block || rec.last_scanned_block === 0) {
+        rec.last_scanned_block = Math.max(createdAt - 1, 0);
+      }
+    }
+
+    // persist row (minimal)
+    await upsertEscrowRow(chainId, escLower, rec);
+    await upsertEscrowPublicRow(chainId, escLower, rec, {
+      blockNumber: log.blockNumber,
+      transactionHash: log.transactionHash,
+      logIndex:
+        typeof log.logIndex === "number"
+          ? log.logIndex
+          : typeof log.index === "number"
+            ? log.index
+            : 0,
+    });
+
+    console.log(
+      `${chainTag(chainId)} discovered JobCreated escrow=${escrowAddr}`,
+    );
+  }
+}
+
+async function readUmaFieldsIfNeeded(chainId, provider, escAddr, rec) {
+  if (chainId !== 84532) return;
+  // only meaningful when disputed, but safe to read anyway
+  try {
+    const c = new ethers.Contract(escAddr, ESCROW_ABI, provider);
+
+    const [assertionId, assertionExp, disputeStart, grace] = await Promise.all([
+      c.disputeAssertionId().catch(() => rec.disputeAssertionId),
+      c
+        .disputeAssertionExpiration()
+        .catch(() => rec.disputeAssertionExpiration),
+      c.disputeStart().catch(() => rec.disputeStart),
+      c.DISPUTE_GRACE().catch(() => rec.DISPUTE_GRACE),
+    ]);
+
+    if (assertionId) rec.disputeAssertionId = assertionId;
+    if (assertionExp !== undefined)
+      rec.disputeAssertionExpiration = Number(assertionExp);
+    if (disputeStart !== undefined) rec.disputeStart = Number(disputeStart);
+    if (grace !== undefined) rec.DISPUTE_GRACE = Number(grace);
+  } catch (e) {
+    // non-fatal
+  }
+}
+
+async function processEscrowLogsForRange(
+  chainId,
+  provider,
+  fromBlock,
+  toBlock,
+) {
+  const escrowsMap = db.escrowsByChain?.[chainId] || {};
+  const escrows = Object.keys(escrowsMap);
+
+  if (escrows.length === 0) return;
+
+  for (const escLower of escrows) {
+    const escAddr = ethers.getAddress(escLower);
+    const rec = db.escrowsByChain?.[chainId]?.[escLower];
+    if (!rec) continue;
+
+    // Determine where THIS escrow should start scanning
+    const created = Number(rec.created_block || 0);
+    const lastScanned = Number(rec.last_scanned_block || 0);
+
+    // If we don't know created block, only scan a small recent window (avoid pruned history)
+    const safeRecentStart = Math.max(toBlock - 5000, 0);
+
+    let start = lastScanned > 0 ? lastScanned + 1 : 0;
+    if (start === 0 && created > 0) start = Math.max(created - 5, 0);
+    if (start === 0) start = safeRecentStart;
+
+    // never go outside the current chunk window
+    start = Math.max(start, fromBlock);
+    const end = toBlock;
+
+    if (start > end) continue;
+
+    let logs = [];
+    try {
+      // ✅ clamp per-escrow scanning to safe window near head
+      const head = await provider.getBlockNumber().catch(() => end);
+      const safeStart = clampFromBlock(chainId, start, head);
+      const safeEnd = Math.max(safeStart, Number(end));
+
+      logs = await provider.getLogs({
+        address: escAddr,
+        fromBlock: safeStart,
+        toBlock: safeEnd,
+      });
+    } catch (e) {
+      const msg = String(e?.message || e).toLowerCase();
+      const pruned =
+        msg.includes("history has been pruned") ||
+        msg.includes("pruned") ||
+        msg.includes("missing trie node") ||
+        msg.includes("header not found") ||
+        e?.code === -32701;
+
+      if (pruned) {
+        // ✅ If pruned, jump this escrow cursor forward to (head - SAFE_WINDOW)
+        const head = await provider.getBlockNumber().catch(() => end);
+        const window = SAFE_WINDOW_BY_CHAIN[chainId] ?? 50_000;
+        const jumpTo = Math.max(0, Number(head) - window);
+
+        rec.last_scanned_block = jumpTo;
+        await upsertEscrowRow(chainId, escLower, rec);
+
+        console.warn(
+          `${chainTag(chainId)} PRUNED logs for ${escAddr}. Jumping escrow cursor to ${jumpTo}`,
+        );
+        continue;
+      }
+
+      console.warn(
+        `${chainTag(chainId)} getLogs failed for ${escAddr}:`,
+        e?.message || e,
+      );
+      continue;
+    }
+
+    if (logs.length > 0) {
+      console.log(
+        `${chainTag(chainId)} ${escAddr} fetched ${logs.length} logs (${start}→${end})`,
+      );
+    }
+
+    for (const log of logs) {
+      try {
+        await handleLog(chainId, provider, escAddr, log);
+      } catch (err) {
+        console.error(
+          `${chainTag(chainId)} handleLog crashed for ${escAddr}:`,
+          err?.message || err,
+        );
+
+        // print minimal log identity for debugging
+        console.error(
+          `${chainTag(chainId)} log meta: tx=${log.transactionHash} idx=${log.logIndex ?? log.index ?? "?"} block=${log.blockNumber}`,
+        );
+
+        // continue so watcher can still advance cursors
+        continue;
+      }
+    }
+
+    // advance per-escrow scan cursor after successful scan
+    rec.last_scanned_block = end;
+    await upsertEscrowRow(chainId, escLower, rec);
+
+    // extra UMA reads when needed
+    if (rec && rec.state === 5) {
+      await readUmaFieldsIfNeeded(chainId, provider, escAddr, rec);
+      await upsertEscrowRow(chainId, escLower, rec);
+    }
+  }
+}
+
+// ===== handleLog =====
+async function handleLog(chainId, provider, escAddr, log) {
   let parsed;
-  try { parsed = escrowIface.parseLog(log); } catch { return; }
+  try {
+    parsed = escrowIface.parseLog(log);
+  } catch {
+    return;
+  }
   if (!parsed?.name) return;
 
   const name = parsed.name;
-  const escKey = ethers.getAddress(escAddr);  // ← checksum safe
+  const escKey = ethers.getAddress(escAddr);
   const key = escKey.toLowerCase();
 
-  if (!db.escrows[key]) {
-    db.escrows[key] = {
-      state: 0, deadline: 0, completed: false,
-      client: null, freelancer: null, oracle: null,
-      tgClientId: null, tgFreelancerId: null, tgOracleId: DEFAULT_ORACLE_TG_ID || null
-    };
+  const rec = ensureEscrowLocal(chainId, key);
+
+  // ===== LOG DEDUPE (prevents loops / replay spam) =====
+  // Unique enough per log: txHash + logIndex
+  const logIndex =
+    typeof log.index === "number"
+      ? log.index
+      : typeof log.logIndex === "number"
+        ? log.logIndex
+        : 0;
+
+  const dedupeKey = `${log.transactionHash || "0x"}:${logIndex}`;
+
+  // keep small rolling memory per escrow
+  if (!Array.isArray(rec._recentLogs)) rec._recentLogs = [];
+
+  // if we've already processed this log, skip
+  if (rec._recentLogs.includes(dedupeKey)) {
+    return;
   }
 
-  const rec = db.escrows[key];
+  // add and trim
+  rec._recentLogs.push(dedupeKey);
+  if (rec._recentLogs.length > 50) {
+    rec._recentLogs = rec._recentLogs.slice(-50);
+  }
 
   if (!rec.client || !rec.freelancer || !rec.oracle) {
     try {
@@ -222,7 +1018,7 @@ async function handleLog(escAddr, log) {
       const [client, freelancer, oracle] = await Promise.all([
         c.client().catch(() => null),
         c.freelancer().catch(() => null),
-        c.oracle().catch(() => null)
+        c.oracle().catch(() => null),
       ]);
       if (client) rec.client = client;
       if (freelancer) rec.freelancer = freelancer;
@@ -232,208 +1028,336 @@ async function handleLog(escAddr, log) {
     }
   }
 
-  const tokenSym = await (async () => {
-    try {
-      const c = new ethers.Contract(escAddr, ESCROW_ABI, provider);
-      const token = await c.settlementToken();
-      return token.toLowerCase() === USDT_ADDRESS.toLowerCase() ? 'USDT' :
-             token.toLowerCase() === USDC_ADDRESS.toLowerCase() ? 'USDC' : 'TOKEN';
-    } catch { return 'TOKEN'; }
-  })();
+  let tokenSym = "TOKEN";
+  let tokenDecimals = 18;
 
-  const where = labelEscrow(escAddr);
+  try {
+    const meta = await getSettlementMeta(chainId, provider, escAddr);
+    tokenSym = meta.tokenSym;
+    tokenDecimals = meta.tokenDecimals;
+  } catch {
+    // keep defaults
+  }
+
+  const where = labelEscrowChain(chainId, escAddr);
+
+  async function persist() {
+    await upsertEscrowRow(chainId, key, rec);
+
+    await upsertEscrowPublicRow(chainId, key, rec, {
+      blockNumber: log.blockNumber,
+      transactionHash: log.transactionHash,
+      logIndex:
+        typeof log.logIndex === "number"
+          ? log.logIndex
+          : typeof log.index === "number"
+            ? log.index
+            : 0,
+    });
+  }
+
+  function dbgArgs(tag) {
+    try {
+      const a = Array.from(parsed.args || []).map((x) =>
+        x === null ? "null" : x === undefined ? "undefined" : String(x),
+      );
+      console.log(`${chainTag(chainId)} ${tag} args=`, a);
+    } catch {}
+  }
 
   switch (name) {
-    case 'Deposited': {
-      const [, amount] = parsed.args;
-      const amt = ethers.formatUnits(amount, TOKEN_DECIMALS);
-      rec.state = 1;
-      await notify(rec.tgFreelancerId, `Deposit Received 💰 — ${amt} ${tokenSym}\nEscrow: ${where}`);
-      await notify(rec.tgClientId, `You deposited 💰 ${amt} ${tokenSym}\nEscrow: ${where}`);
+    case "Deposited": {
+      const amount = parsed.args?.[1];
+      if (amount == null) {
+        dbgArgs("Deposited(null amount)");
+        return;
+      }
+      const amt = ethers.formatUnits(amount, tokenDecimals);
+
+      rec.state = 0;
+
+      await notify(
+        rec.tgFreelancerId,
+        `Deposit Received 💰 — ${amt} ${tokenSym}\nEscrow: ${where}`,
+      );
+      await notify(
+        rec.tgClientId,
+        `You deposited 💰 ${amt} ${tokenSym}\nEscrow: ${where}`,
+      );
+
+      await persist();
       break;
     }
-    case 'FeePaid': {
-      const [, feeAmount] = parsed.args;
+
+    case "FeePaid": {
+      const feeAmount = parsed.args?.[1];
+      if (feeAmount == null) {
+        dbgArgs("FeePaid(null feeAmount)");
+        return;
+      }
+
       const fee = ethers.formatUnits(feeAmount, 18);
-      rec.state = 2;
-      await notify(rec.tgFreelancerId, `Fee Paid 🤑 — ${fee} BNB\nYou can now start the job!\nEscrow: ${where}`);
-      await notify(rec.tgClientId, `You paid the fee 🤑 — ${fee} BNB\nFreelancer can start.\nEscrow: ${where}`);
+      const sym = nativeSymbol(chainId);
+
+      rec.state = 0;
+
+      await notify(
+        rec.tgFreelancerId,
+        `Fee Paid 🤑 — ${fee} ${sym}\nYou can now start the job!\nEscrow: ${where}`,
+      );
+      await notify(
+        rec.tgClientId,
+        `You paid the fee 🤑 — ${fee} ${sym}\nFreelancer can start.\nEscrow: ${where}`,
+      );
+
+      await persist();
       break;
     }
-    case 'Started': {
+
+    case "Started": {
       const [deadline] = parsed.args;
-      const when = new Date(Number(deadline) * 1000).toLocaleString();
-      rec.state = 3;
-      rec.deadline = Number(deadline);
-      await notify(rec.tgClientId, `Job Started! 🔥\nDeadline: *${when}*\nEscrow: ${where}`);
-      await notify(rec.tgFreelancerId, `You started the job 🔥\nDeadline: *${when}*\nEscrow: ${where}`);
+
+      // deadline is a unix timestamp (seconds)
+      const deadlineSec = Number(deadline || 0);
+      const whenLocal = deadlineSec
+        ? new Date(deadlineSec * 1000).toLocaleString()
+        : "—";
+
+      rec.state = 1;
+      rec.deadline = deadlineSec;
+
+      // ✅ persist state change first (so frontend updates even if notify fails)
+      await persist();
+
+      const msg = `Job Started! 🔥\nExpected completion: *${whenLocal}*\nEscrow: ${where}`;
+
+      // ✅ don’t let a failed notify block the flow
+      await Promise.allSettled([
+        notify(rec.tgClientId, msg),
+        notify(
+          rec.tgFreelancerId,
+          msg.replace("Job Started!", "You started the job 🔥"),
+        ),
+      ]);
+
       break;
     }
-    case 'Submitted': {
+
+    case "Submitted": {
       const [proofHash] = parsed.args;
-      rec.state = 4;
-      await notify(rec.tgClientId, `Work Submitted! 📄\n\nProof: \`${proofHash}\`\nEscrow: ${where}\n\nPlease review & approve/request revision\n\n💡 *To view the submitted file,* unhash it on [Pinata](https://app.pinata.cloud/auth/signin) by searching for the CID without the "ipfs://" e.g: bafkreieqryqewmspvcdl2f5oq6tydrtybrfjh4zj27ko53fznxp6zazibu, using the search bar`);
-      await notify(rec.tgFreelancerId, `You submitted proof 📄\nWaiting for client approval/revision request\nEscrow: ${where}`);
+
+      rec.state = 2;
+
+      const cid = String(proofHash || "").replace("ipfs://", "");
+      const ipfsUrl = cid ? `https://ipfs.io/ipfs/${cid}` : null;
+
+      // ✅ persist state change first
+      await persist();
+
+      const clientMsg =
+        `Work Submitted! 📄\n\n` +
+        `Escrow: ${where}\n` +
+        (ipfsUrl ? `\n[View submitted proof](${ipfsUrl})` : "");
+
+      const freelancerMsg = `You submitted proof 📄\nWaiting for client approval/revision request\nEscrow: ${where}`;
+
+      await Promise.allSettled([
+        notify(rec.tgClientId, clientMsg),
+        notify(rec.tgFreelancerId, freelancerMsg),
+      ]);
+
       break;
     }
-    case 'Revised': {
+
+    case "Revised": {
       const [messageHash] = parsed.args;
       rec.state = 4;
-      await notify(rec.tgFreelancerId, `Revision Requested 📝\n💬 Revision message: \`${messageHash}\`\nPlease resubmit your work\nEscrow: ${where}`);
-      await notify(rec.tgClientId, `Revision request sent to freelancer 📝\nEscrow: ${where}`);
+
+      await notify(
+        rec.tgFreelancerId,
+        `Revision Requested 📝\n💬 Revision message: \`${messageHash}\`\nPlease resubmit your work\nEscrow: ${where}`,
+      );
+      await notify(
+        rec.tgClientId,
+        `Revision request sent to freelancer 📝\nEscrow: ${where}`,
+      );
+
+      await persist();
       break;
     }
-    case 'Approved': {
-      const [, deposit, bonus] = parsed.args;
-      const dep = ethers.formatUnits(deposit, TOKEN_DECIMALS);
-      const bon = ethers.formatUnits(bonus, 18);
-      await notify(rec.tgFreelancerId, `APPROVED! ✅\nYou received ${dep} ${tokenSym} 💰\nEscrow: ${where}\nThank you!`);
-      await notify(rec.tgClientId, `Job approved ✅\nPayment released: ${dep} ${tokenSym} 💰\nEscrow: ${where}`);
-      markEscrowCompleted(escAddr);
-      break;
-    }
-    case 'Disputed': {
-      const [by] = parsed.args;
-      await notify(rec.tgClientId, `DISPUTE RAISED ⚠️\nEscrow: ${where}\nOracle will review`);
-      await notify(rec.tgFreelancerId, `DISPUTE RAISED ⚠️\nEscrow: ${where}\nOracle will review`);
-      await notify(rec.tgOracleId || DEFAULT_ORACLE_TG_ID, `NEW DISPUTE ⚠️ — REVIEW REQUIRED\nEscrow: ${where}`);
-      await notifyAdmins(`DISPUTE ⚠️: ${escAddr}\nBy: \`${by}\``);
-      break;
-    }
-    case 'Resolved': {
-      const [winner, amount] = parsed.args;
-      const amt = ethers.formatUnits(amount, TOKEN_DECIMALS);
-      await notify(rec.tgClientId, `Dispute Resolved ✅\nWinner: \`${winner}\` — ${amt} ${tokenSym}\nEscrow: ${where}`);
-      await notify(rec.tgFreelancerId, `Dispute Resolved ✅\nWinner: \`${winner}\` — ${amt} ${tokenSym}\nEscrow: ${where}`);
-      await notify(rec.tgOracleId || DEFAULT_ORACLE_TG_ID, `Dispute Resolved ✅\nWinner: \`${winner}\`\nEscrow: ${where}`);
-      markEscrowCompleted(escAddr);
-      break;
-    }
-  }
-  saveDb();
-}
 
-// ===== ULTRA-ROBUST POLLING — NEVER HANGS, NEVER TIMES OUT =====
-async function pollOnce() {
-  try {
-    const latestBlock = await provider.getBlockNumber().catch(() => null);
-    if (!latestBlock) {
-      console.warn('Failed to get latest block — skipping poll');
-      return;
-    }
+    case "Approved": {
+      const freelancer = parsed.args?.[0];
+      const amount = parsed.args?.[1];
 
-    let fromBlock = db.lastBlock + 1;
-    if (latestBlock - fromBlock > 200) {
-      console.log(`Jumping forward from block ${fromBlock} → ${latestBlock - 200}`);
-      fromBlock = latestBlock - 200;
-    }
-    if (fromBlock >= latestBlock) {
-      db.lastBlock = latestBlock;
-      saveDb();
-      return;
-    }
-
-    const toBlock = latestBlock - 1;
-    const escrows = Object.keys(db.escrows);
-
-    if (escrows.length === 0) {
-      db.lastBlock = latestBlock;
-      saveDb();
-      return;
-    }
-
-    for (const esc of escrows) {
-      try {
-        const logs = await provider.getLogs({
-          address: esc,
-          fromBlock,
-          toBlock
-        }).catch(() => []);
-
-        for (const log of logs) {
-          await handleLog(esc, log);
-        }
-      } catch (e) {
-        if (e?.code === 'TIMEOUT' || e?.message?.includes('timeout')) {
-          console.log(`Timeout on ${esc} — skipping this cycle (will retry)`);
-        } else if (e?.message?.includes('invalid block range')) {
-          console.log(`Invalid block range for ${esc} — skipping`);
-        } else {
-          console.warn(`Log fetch error for ${esc}:`, e.message || e);
-        }
+      if (!freelancer || amount == null) {
+        dbgArgs("Approved(bad args)");
+        return;
       }
+
+      rec.state = 3;
+
+      // ✅ FIX: use `amount`, not `deposit`
+      const dep = ethers.formatUnits(amount, tokenDecimals);
+
+      // ✅ persist state change first
+      await persist();
+
+      const msgFreelancer = `APPROVED! ✅\nYou received ${dep} ${tokenSym} 💰\nEscrow: ${where}\nThank you!`;
+
+      const msgClient = `Job approved ✅\nPayment released: ${dep} ${tokenSym} 💰\nEscrow: ${where}`;
+
+      // ✅ never let notify failures block completion
+      await Promise.allSettled([
+        notify(rec.tgFreelancerId, msgFreelancer),
+        notify(rec.tgClientId, msgClient),
+      ]);
+
+      // ✅ then mark completed (this removes it from active map)
+      await markEscrowCompleted(chainId, escAddr);
+
+      break;
     }
 
-    db.lastBlock = latestBlock;
-    saveDb();
-  } catch (err) {
-    console.error('pollOnce critical error:', err.message || err);
+    case "Disputed": {
+      const [by] = parsed.args;
+      rec.state = 5;
+
+      await notify(
+        rec.tgClientId,
+        `DISPUTE RAISED ⚠️\nEscrow: ${where}\nOracle will review, stay updated on the escrow dashboard.`,
+      );
+      await notify(
+        rec.tgFreelancerId,
+        `DISPUTE RAISED ⚠️\nEscrow: ${where}\nOracle will review, stay updated on the escrow dashboard.`,
+      );
+      await notify(
+        rec.tgOracleId || DEFAULT_ORACLE_TG_ID,
+        `NEW DISPUTE ⚠️ — REVIEW REQUIRED\nEscrow: ${where}`,
+      );
+      await notifyAdmins(`DISPUTE ⚠️: ${escAddr}\nBy: \`${by}\``);
+
+      await persist();
+      break;
+    }
+
+    case "Resolved": {
+      const winner = parsed.args?.[0];
+      const amount = parsed.args?.[1];
+
+      if (amount == null) {
+        dbgArgs("Resolved(null amount)");
+        return;
+      }
+
+      const amt = ethers.formatUnits(amount, tokenDecimals);
+
+      rec.state = 6;
+
+      await notify(
+        rec.tgClientId,
+        `Dispute Resolved ✅\nWinner: \`${winner}\` — ${amt} ${tokenSym}\nEscrow: ${where}`,
+      );
+      await notify(
+        rec.tgFreelancerId,
+        `Dispute Resolved ✅\nWinner: \`${winner}\` — ${amt} ${tokenSym}\nEscrow: ${where}`,
+      );
+      await notify(
+        rec.tgOracleId || DEFAULT_ORACLE_TG_ID,
+        `Dispute Resolved ✅\nWinner: \`${winner}\`\nEscrow: ${where}`,
+      );
+
+      // ✅ persist state change BEFORE completing/removing from active cache
+      await persist();
+      await markEscrowCompleted(chainId, escAddr);
+      break;
+    }
+
+    default:
+      break;
   }
 }
 
-// ===== RESTART POLLING ON PROVIDER FAILURE =====
-provider.on('error', async (err) => {
-  console.error('Provider error — restarting provider...', err.message);
-  provider = await createProvider();
-});
-
-
-// ===== ALL COMMANDS — UNCHANGED & PERFECT =====
-bot.command('stats', async (ctx) => {
+// ===== ALL COMMANDS =====
+bot.command("stats", async (ctx) => {
   try {
     const userId = ctx.from.id;
-    const isPrivileged = ADMIN_TG_IDS.includes(String(userId)) ||
-                         ORACLE_ALERT_TG_IDS.includes(String(userId)) ||
-                         String(userId) === DEFAULT_ORACLE_TG_ID;
+    const isPrivileged =
+      ADMIN_TG_IDS.includes(String(userId)) ||
+      ORACLE_ALERT_TG_IDS.includes(String(userId)) ||
+      String(userId) === DEFAULT_ORACLE_TG_ID;
 
     const now = Math.floor(Date.now() / 1000);
-    const active = [], completed = [], expired = [];
 
-    const escrowsToCheck = isPrivileged
-      ? Object.entries(db.escrows)
-      : Object.entries(db.escrows).filter(([_, d]) => d.tgClientId === userId || d.tgFreelancerId === userId);
+    const rows = allActiveEscrowsFlat();
 
-    for (const [addr, data] of escrowsToCheck) {
-      const e = { addr, ...data };
-      const isExpired = e.state < 2 && e.deadline > 0 && now > e.deadline + 86400 * 3;
+    const visible = isPrivileged
+      ? rows
+      : rows.filter(
+          ({ rec }) =>
+            rec.tgClientId === userId || rec.tgFreelancerId === userId,
+        );
+
+    const active = [];
+    const completed = [];
+    const expired = [];
+
+    for (const { chainId, escLower, rec } of visible) {
+      const e = { chainId, addr: ethers.getAddress(escLower), ...rec };
+
+      const isExpired =
+        e.state < 2 && e.deadline > 0 && now > e.deadline + 86400 * 3;
+
       if (e.completed) completed.push(e);
       else if (isExpired) expired.push(e);
       else active.push(e);
     }
 
-    const totalEver = (isPrivileged ? Object.keys(db.escrows).length : escrowsToCheck.length) + db.stats.totalCompleted;
-    const format = (e) => `\`${e.addr}\` — [view](${explorer(e.addr)})`;
+    const totalEver = visible.length + db.stats.totalCompleted;
 
-    let text = isPrivileged ? `*GLOBAL ESCROW STATS* \\(BSC\\)\n\n` : `*YOUR ESCROW STATS*\n\n`;
+    const format = (e) =>
+      `• ${CHAINS[e.chainId]?.name || e.chainId}\n  \`${e.addr}\`\n  [view](${explorerAddr(e.chainId, e.addr)})`;
+
+    let text = isPrivileged
+      ? `*GLOBAL ESCROW STATS*\n\n`
+      : `*YOUR ESCROW STATS*\n\n`;
     text += `*Total Jobs Ever:* \`${totalEver}\`\n`;
-    text += `*Active:* \`${active.length}\` \\| *Completed:* \`${completed.length + db.stats.totalCompleted}\` \\| *Expired:* \`${expired.length}\`\n\n`;
+    text += `*Active:* \`${active.length}\` | *Completed:* \`${completed.length + db.stats.totalCompleted}\` | *Expired:* \`${expired.length}\`\n\n`;
 
-    if (active.length) text += `*Active Escrows*\n${active.map(format).join('\n')}\n\n`;
+    if (active.length)
+      text += `*Active Escrows*\n${active.map(format).join("\n")}\n\n`;
     if (completed.length || db.stats.totalCompleted) {
       text += `*Completed Escrows*`;
-      if (completed.length) text += `\n${completed.slice(-10).map(format).join('\n')}`;
-      if (db.stats.totalCompleted > completed.length) text += `\n\\+ ${db.stats.totalCompleted - completed.length} older completed jobs`;
+      if (completed.length)
+        text += `\n${completed.slice(-10).map(format).join("\n")}`;
+      if (db.stats.totalCompleted > completed.length) {
+        text += `\n+ ${db.stats.totalCompleted - completed.length} older completed jobs`;
+      }
       text += `\n\n`;
     }
-    if (expired.length) text += `*Expired \\(Unfunded\\)*\n${expired.map(format).join('\n')}\n\n`;
+    if (expired.length)
+      text += `*Expired (Unfunded)*\n${expired.map(format).join("\n")}\n\n`;
 
     if (active.length + completed.length + expired.length === 0) {
-      text += isPrivileged ? "No escrows yet\\." : "😏 You have no escrows yet\\.";
+      text += isPrivileged ? "No escrows yet." : "😏 You have no escrows yet.";
     } else {
-      text += `Hard work pays 🤝\\.`;
+      text += `Hard work pays 🤝.`;
     }
 
-    await ctx.reply(text, { parse_mode: 'MarkdownV2', disable_web_page_preview: true });
+    await ctx.reply(text, {
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+    });
   } catch (err) {
-    ctx.reply('Stats temporarily unavailable.');
+    ctx.reply("Stats temporarily unavailable.");
   }
 });
 
 bot.start(async (ctx) => {
   await ctx.reply(
-`*Welcome to AfriLance Bot* 🤝
+    `*Welcome to AfriLance Bot* 🤝
 
-The main app is now at https://afrilance-landing.vercel.app/
+The main app is now at https://testnet.afrilance.xyz/
 
 To receive Telegram alerts for escrow events (deposits, disputes, approvals), link your Telegram ID using the format below:
 
@@ -442,55 +1366,248 @@ To receive Telegram alerts for escrow events (deposits, disputes, approvals), li
 *Link Command Example:*
 Client - /link escrowAddress client yourAddress
 Freelancer - /link escrowAddress freelancer yourAddress`,
-    { parse_mode: 'Markdown', disable_web_page_preview: true }
+    { parse_mode: "Markdown", disable_web_page_preview: true },
   );
 });
 
-bot.command('link', async (ctx) => {
+bot.command("link", async (ctx) => {
   const parts = ctx.message.text.trim().split(/\s+/).slice(1);
-  if (parts.length < 3) return ctx.reply('Usage: /link <escrow> <client|freelancer|oracle> <address>');
 
-  const [esc, role, addr] = parts;
-  if (!ethers.isAddress(esc) || !ethers.isAddress(addr)) return ctx.reply('Invalid address');
+  // Supports:
+  // /link <escrow> <client|freelancer|oracle> <address>
+  // /link <chain> <escrow> <client|freelancer|oracle> <address>
+  if (parts.length < 3) {
+    return ctx.reply(
+      "Usage: /link [chain] <escrow> <client|freelancer|oracle> <address>",
+    );
+  }
+
+  let chainId = parseChainArg(parts[0]);
+  let esc, role, addr;
+
+  if (chainId) {
+    if (parts.length < 4) {
+      return ctx.reply(
+        "Usage: /link <chain> <escrow> <client|freelancer|oracle> <address>",
+      );
+    }
+    [esc, role, addr] = parts.slice(1);
+  } else {
+    [esc, role, addr] = parts;
+  }
+
+  if (!ethers.isAddress(esc) || !ethers.isAddress(addr))
+    return ctx.reply("Invalid address");
 
   const escKey = ethers.getAddress(esc).toLowerCase();
-  const r = role.toLowerCase();
+  const r = String(role || "").toLowerCase();
 
-  if (!['client', 'freelancer', 'oracle'].includes(r)) return ctx.reply('Role: client|freelancer|oracle');
-  if (r === 'oracle' && !ADMIN_TG_IDS.includes(String(ctx.from.id))) return ctx.reply('Only admin can link oracle');
+  if (!["client", "freelancer", "oracle"].includes(r))
+    return ctx.reply("Role: client|freelancer|oracle");
+  if (r === "oracle" && !ADMIN_TG_IDS.includes(String(ctx.from.id)))
+    return ctx.reply("Only admin can link oracle");
 
-  db.escrows[escKey] = db.escrows[escKey] || {};
-  db.escrows[escKey][r] = ethers.getAddress(addr);
-  db.escrows[escKey]['tg' + r.charAt(0).toUpperCase() + r.slice(1) + 'Id'] = ctx.from.id;
+  if (!chainId) {
+    chainId = await detectChainForEscrow(escKey);
+    if (!chainId) {
+      return ctx.reply(
+        "I couldn't detect the chain for that escrow.\nTry: /link bnb <escrow> <role> <address>\nOr: /link base <escrow> <role> <address>",
+      );
+    }
+  }
 
-  saveDb();
-  ctx.reply(`✅ Linked\n*Escrow:* ${formatAddress(esc)}\n*Role:* ${r}\n*Wallet:* ${formatAddress(addr)}\nNow you will get escrow event alerts.`, { parse_mode: 'Markdown' });
+  const prov = await getProvider(chainId);
+  const currentBlock = await prov.getBlockNumber().catch(() => 0);
+
+  const rec = ensureEscrowLocal(chainId, escKey);
+
+  // wallet for role (optional, but good)
+  rec[r] = ethers.getAddress(addr);
+
+  // telegram id for role
+  rec["tg" + r.charAt(0).toUpperCase() + r.slice(1) + "Id"] = ctx.from.id;
+
+  // initialize scan anchors so we don't request pruned history
+  const anchor = Math.max(currentBlock - 5000, 0);
+
+  if (!rec.created_block || rec.created_block === 0) {
+    rec.created_block = anchor; // best guess when user links manually
+  }
+
+  if (!rec.last_scanned_block || rec.last_scanned_block === 0) {
+    rec.last_scanned_block = anchor;
+  }
+
+  await upsertEscrowRow(chainId, escKey, rec);
+  await upsertEscrowPublicRow(chainId, escKey, rec, {
+    blockNumber: currentBlock,
+    fallbackKey: `link:${ctx.from.id}:${currentBlock}`,
+  });
+
+  ctx.reply(
+    `✅ Linked\n*Chain:* ${CHAINS[chainId]?.name || chainId}\n*Escrow:* ${formatAddress(esc)}\n*Role:* ${r}\n*Wallet:* ${formatAddress(addr)}\n\n*Now you will get escrow event alerts.* 🔔`,
+    { parse_mode: "Markdown" },
+  );
 });
 
-bot.command('who', async (ctx) => {
-  const esc = ctx.message.text.split(' ')[1];
-  if (!ethers.isAddress(esc)) return ctx.reply('Usage: /who <escrow>');
-  const rec = db.escrows[esc.toLowerCase()] || {};
-  const oracleTg = rec.tgOracleId || DEFAULT_ORACLE_TG_ID || '—';
-  await ctx.reply(
+bot.command("who", async (ctx) => {
+  const parts = ctx.message.text.trim().split(/\s+/).slice(1);
 
-`*WHO GETS NOTIFIED* 🔔
+  // Supports:
+  // /who <escrow>
+  // /who <chain> <escrow>
+  if (parts.length < 1) return ctx.reply("Usage: /who [chain] <escrow>");
 
-*ESCROW:* ${formatAddress(esc)}
-\n*Client:* ${formatAddress(rec.client)} \\(*tg:* \`${rec.tgClientId || '—'}\`\\)
-*Freelancer:* ${formatAddress(rec.freelancer)} \\(*tg:* \`${rec.tgFreelancerId || '—'}\`\\)
-*Oracle:* ${formatAddress(rec.oracle)} \\(*tg:* \`${oracleTg}\`\\)`,
-    { parse_mode: 'MarkdownV2' }
-  );
+  let chainId = parseChainArg(parts[0]);
+  let esc = chainId ? parts[1] : parts[0];
+
+  if (!esc || !ethers.isAddress(esc))
+    return ctx.reply("Usage: /who [chain] <escrow>");
+
+  const escKey = ethers.getAddress(esc).toLowerCase();
+
+  let matches = [];
+  if (chainId) {
+    const rec = db.escrowsByChain?.[chainId]?.[escKey];
+    if (rec) matches.push({ chainId, rec });
+  } else {
+    for (const chainIdStr of Object.keys(db.escrowsByChain || {})) {
+      const cid = Number(chainIdStr);
+      const rec = db.escrowsByChain?.[cid]?.[escKey];
+      if (rec) matches.push({ chainId: cid, rec });
+    }
+  }
+
+  if (matches.length === 0) {
+    return ctx.reply(
+      "No record for that escrow yet. Link first using /link so the bot knows who to notify.",
+    );
+  }
+
+  const lines = matches.map(({ chainId, rec }) => {
+    const oracleTg = rec.tgOracleId || DEFAULT_ORACLE_TG_ID || "—";
+    return (
+      `*${escapeMdV2(CHAINS[chainId]?.name || String(chainId))}*\n` +
+      `*ESCROW:* ${formatAddress(esc)}\n` +
+      `*Client:* ${formatAddress(rec.client)} \\(*tg:* \`${rec.tgClientId || "—"}\`\\)\n` +
+      `*Freelancer:* ${formatAddress(rec.freelancer)} \\(*tg:* \`${rec.tgFreelancerId || "—"}\`\\)\n` +
+      `*Oracle:* ${formatAddress(rec.oracle)} \\(*tg:* \`${oracleTg}\`\\)\n`
+    );
+  });
+
+  await ctx.reply(`*WHO GETS NOTIFIED* 🔔\n\n${lines.join("\n")}`, {
+    parse_mode: "MarkdownV2",
+  });
 });
 
 // ===== LAUNCH =====
-console.log('AfriLance BOT v9.3 — SUPABASE PERSISTENT');
+console.log("AfriLance BOT v9.3 — SUPABASE PERSISTENT");
 console.log(`Completed jobs: ${db.stats.totalCompleted}`);
 
-bot.launch({ dropPendingUpdates: true })
-  .then(() => console.log('AfriLance BOT IS LIVE — UNSTOPPABLE'))
-  .catch(err => console.error('Bot failed to start:', err));
+bot
+  .launch({ dropPendingUpdates: true })
+  .then(() => console.log("AfriLance BOT IS LIVE — UNSTOPPABLE"))
+  .catch((err) => console.error("Bot failed to start:", err));
 
-setInterval(pollOnce, 30000);
-pollOnce();
+async function watchChain(chainId) {
+  const cid = Number(chainId);
+
+  while (true) {
+    // ✅ Always get the current provider (so resetProvider() actually rotates)
+    let prov;
+    try {
+      prov = await getProvider(cid);
+    } catch (e) {
+      console.error(`${chainTag(cid)} provider init failed:`, e?.message || e);
+      await sleep(3000);
+      continue;
+    }
+
+    try {
+      const latest = await prov.getBlockNumber();
+      const target = Math.max(0, latest - CONFIRMATIONS);
+
+      let { lastBlock: cursor, lastHash: cursorHash } =
+        await getChainCursor(cid);
+
+      if (cursor === 0) {
+        cursor = Math.max(0, target - 5000);
+        const initHash = await getBlockHashSafe(prov, cursor);
+        await setChainCursor(cid, cursor, initHash);
+        cursorHash = initHash;
+      } else if (cursorHash) {
+        const liveHash = await getBlockHashSafe(prov, cursor);
+
+        if (liveHash && liveHash !== cursorHash) {
+          const rewindTo = Math.max(0, cursor - REORG_REWIND);
+          const rewindHash = await getBlockHashSafe(prov, rewindTo);
+
+          console.warn(
+            `${chainTag(cid)} REORG detected at cursor=${cursor}. Rewinding to ${rewindTo}`,
+          );
+
+          await setChainCursor(cid, rewindTo, rewindHash);
+          cursor = rewindTo;
+          cursorHash = rewindHash;
+        }
+      }
+
+      if (cursor >= target) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+
+      const fromBlock = cursor + 1;
+      const range = cid === 97 ? 1000 : MAX_RANGE;
+      const toBlock = Math.min(target, fromBlock + range - 1);
+
+      console.log(
+        `${chainTag(cid)} scanning blocks ${fromBlock} → ${toBlock} (target=${target})`,
+      );
+
+      await discoverFactoryJobs(cid, prov, fromBlock, toBlock);
+      await processEscrowLogsForRange(cid, prov, fromBlock, toBlock);
+
+      const toHash = await getBlockHashSafe(prov, toBlock);
+      await setChainCursor(cid, toBlock, toHash);
+    } catch (e) {
+      const msg = String(e?.message || e).toLowerCase();
+      const pruned =
+        msg.includes("history has been pruned") ||
+        msg.includes("pruned") ||
+        e?.code === -32701;
+
+      if (pruned) {
+        const latest = await prov.getBlockNumber().catch(() => 0);
+        const target = Math.max(0, latest - CONFIRMATIONS);
+
+        const window = SAFE_WINDOW_BY_CHAIN[cid] ?? 50_000;
+        const jumpTo = Math.max(0, target - window);
+
+        console.warn(
+          `${chainTag(cid)} RPC pruned history. Jumping cursor forward to ${jumpTo} (target=${target})`,
+        );
+
+        const jumpHash = await getBlockHashSafe(prov, jumpTo);
+        await setChainCursor(cid, jumpTo, jumpHash);
+        await sleep(2000);
+        continue;
+      }
+
+      // ✅ timeout -> rotate RPC
+      if (isRpcTimeout(e)) {
+        console.warn(`${chainTag(cid)} RPC timeout. Rotating RPC...`);
+        resetProvider(cid);
+        await sleep(1500);
+        continue;
+      }
+
+      console.error(`${chainTag(cid)} watch error:`, e?.message || e);
+      await sleep(5000);
+    }
+  }
+}
+
+// start both watchers
+watchChain(97);
+watchChain(84532);
