@@ -2,10 +2,7 @@
 
 **Empowering African talent and global clients with secure, transparent, and innovative freelance tools.**
 
-AfriLlance provides secure payments and instant paylinks for the on-chain economy. Send, receive, and protect stablecoin payments across Base and BNB Chain. Whether you need trusted escrow for freelance payments or simple links for everyday funds transfer. It combines:
-
 - **AfriLance Escrow** — secure on-chain payments using USDT/USDC with revision cycles, IPFS proofs, and oracle-mediated disputes.
-- **Afrilance Paylinks** is a decentralized payment link system built on Base that enables instant stablecoin payments through simple, shareable links.
 - **Blockchain foundation** — trustless, low-fee infrastructure on BNB Chain & Base.
 
 Live on TESTNET: [https://afrilance.xyz ](https://testnet.afrilance.xyz/)
